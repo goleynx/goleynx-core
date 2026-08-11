@@ -1,0 +1,178 @@
+{
+  "code": "B0001-e01",
+  "sender": "b",
+  "senderName": "中枢窗",
+  "receiver": "b",
+  "receiverName": "中枢窗",
+  "description": "201 收到 A000X → 跑目标提炼引擎 → 写 goals.md (D01) → 发 B0001 通知 301 交叉验证",
+  "trigger": {
+    "pattern": "^A\\d{4}$",
+    "listener": "b"
+  },
+  "round": "0001",
+  "steps": [
+    {
+      "id": "e01-1",
+      "action": "read_file",
+      "desc": "读取 101 对话数据",
+      "input": "runtime/terminals/a/conversations.json",
+      "output_key": "conversations"
+    },
+    {
+      "id": "e01-2",
+      "action": "read_file",
+      "desc": "读取当前 goals.md (D01)",
+      "input": "core/goals.md",
+      "output_key": "current_goals",
+      "fallback": ""
+    },
+    {
+      "id": "e01-3",
+      "action": "llm_call",
+      "desc": "调用大模型提炼核心目标 + 跟已有目标比较",
+      "sourceName": "中枢窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是项目目标提炼专家。只总结用户提出的业务目标，绝不要照搬模型回复里的技术建议。\n\n当前轮次：{{CURRENT_ROUND_PADDED}}\n\n任务：\n1. 阅读本轮用户留言和模型回复\n2. 提炼本轮的核心目标\n3. 跟已有目标比较，计算相似度（0-100）\n4. 判断目标是否发生变化\n\n判断规则：\n- 相似度 >= 80：changed=false（目标未变化）\n- 相似度 < 80：changed=true（目标已变化）\n- 如果已有目标为空（第 1 轮），changed=true\n\n严格按以下 XML 返回，<content> 内使用 Markdown：\n\n<result>\n  <changed>true或false</changed>\n  <similarity>相似度数字（0-100，如 85）</similarity>\n  <project_name>5-8字名称</project_name>\n  <content>\n如果 changed=true（目标已变化或第 1 轮）：\n### 👤 用户原始意图\n[用第三人称提炼用户真实需求]\n\n### 🤖 前期建议（仅供参考）\n> [浓缩模型回复，加：*技术选型与架构由后续审查窗决定*]\n\n### 🎯 核心目标\n1. **业务**：[一句话]\n2. **环境**：[APP(安卓/鸿蒙/iOS) | 网页 | 桌面 | 其他]\n3. **约束**：[硬性条件]\n4. **范围**：[语言/用户]\n5. **交互**：[核心体验]\n\n如果 changed=false（目标未变化）：\n目标未发生变化，相似度 XX%（一句话即可，不要重复已有目标内容）\n  </content>\n</result>",
+      "user_prompt_template": "## 当前轮次：{{CURRENT_ROUND_PADDED}}\n\n## 已有目标（goals.md 当前内容）：\n{{CURRENT_GOALS}}\n\n## 本轮用户留言：\n{{USER_MESSAGES}}\n\n## 模型回复（仅参考）：\n{{MODEL_MESSAGES}}",
+      "output_key": "extraction_raw"
+    },
+    {
+      "id": "e01-4",
+      "action": "parse",
+      "desc": "解析 LLM 输出的 XML",
+      "input_key": "extraction_raw",
+      "rules": {
+        "goals_changed": "match:<changed>(.*?)</changed>",
+        "similarity": "match:<similarity>(.*?)</similarity>",
+        "project_name": "match:<project_name>(.*?)</project_name>",
+        "clean_content": "match:<content>([\\s\\S]*?)</content>"
+      },
+      "output_key": "parsed"
+    },
+    {
+      "id": "e01-5",
+      "action": "write_file",
+      "desc": "写入 goals.md (D01) — 目标已变化时追加本轮内容（保留已有内容）",
+      "core_append": true,
+      "condition": "{{GOALS_CHANGED}} == 'true' || {{IS_FIRST}} == 'true'",
+      "input": "core/goals.md",
+      "content_template": "\n## d01 第 {{CURRENT_ROUND_PADDED}} 轮目标更新\n\n{{CLEAN_CONTENT}}\n\n---"
+    },
+    {
+      "id": "e01-5b",
+      "action": "write_file",
+      "desc": "写入 goals.md (D01) — 目标未变化时追加一句话（保留已有内容）",
+      "core_append": true,
+      "condition": "{{GOALS_CHANGED}} == 'false' && {{IS_FIRST}} == 'false'",
+      "input": "core/goals.md",
+      "content_template": "\n## d01 第 {{CURRENT_ROUND_PADDED}} 轮目标更新\n\n{{CLEAN_CONTENT}}\n\n---"
+    },
+    {
+      "id": "e01-6a",
+      "action": "write_file",
+      "desc": "写入 201 面板状态 — 目标已更新",
+      "condition": "{{GOALS_CHANGED}} == 'true' || {{IS_FIRST}} == 'true'",
+      "input": "runtime/panels/b/statuses.json",
+      "append_array": true,
+      "content": {
+        "round": "{{CURRENT_ROUND_PADDED}}",
+        "id": "goals-{{NOW}}",
+        "timestamp": "{{TIMESTAMP}}",
+        "type": "目标提炼",
+        "message": "🎯 第 {{CURRENT_ROUND_PADDED}} 轮目标提炼 — {{PROJECT_NAME}} — 已更新",
+        "projectName": "{{PROJECT_NAME}}",
+        "goalsChanged": "{{GOALS_CHANGED}}",
+        "similarity": "{{SIMILARITY}}"
+      }
+    },
+    {
+      "id": "e01-6b",
+      "action": "write_file",
+      "desc": "写入 201 面板状态 — 目标未变化",
+      "condition": "{{GOALS_CHANGED}} == 'false' && {{IS_FIRST}} == 'false'",
+      "input": "runtime/panels/b/statuses.json",
+      "append_array": true,
+      "content": {
+        "round": "{{CURRENT_ROUND_PADDED}}",
+        "id": "goals-{{NOW}}",
+        "timestamp": "{{TIMESTAMP}}",
+        "type": "目标提炼",
+        "message": "🎯 第 {{CURRENT_ROUND_PADDED}} 轮目标提炼 — {{PROJECT_NAME}} — 未变化",
+        "projectName": "{{PROJECT_NAME}}",
+        "goalsChanged": "{{GOALS_CHANGED}}",
+        "similarity": "{{SIMILARITY}}"
+      }
+    },
+    {
+      "id": "e01-7a",
+      "action": "write_file",
+      "desc": "写入 201 终端 — 目标已变化",
+      "condition": "{{GOALS_CHANGED}} == 'true' || {{IS_FIRST}} == 'true'",
+      "input": "runtime/terminals/b/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "B{{CURRENT_ROUND_PADDED}}-m01",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "[目标提炼] 第 {{CURRENT_ROUND_PADDED}} 轮 {{PROJECT_NAME}} — 目标已更新"
+      }
+    },
+    {
+      "id": "e01-7b",
+      "action": "write_file",
+      "desc": "写入 201 终端 — 目标未变化",
+      "condition": "{{GOALS_CHANGED}} == 'false' && {{IS_FIRST}} == 'false'",
+      "input": "runtime/terminals/b/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "B{{CURRENT_ROUND_PADDED}}-m01",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "[目标提炼] 第 {{CURRENT_ROUND_PADDED}} 轮 {{PROJECT_NAME}} — 目标未变化"
+      }
+    },
+    {
+      "id": "e01-8",
+      "action": "syslog",
+      "desc": "系统日志",
+      "entries": [
+        {
+          "category": "API",
+          "sourceName": "中枢窗",
+          "message": "[中枢窗] 第 {{CURRENT_ROUND_PADDED}} 轮目标提炼 — {{PROJECT_NAME}}"
+        }
+      ]
+    },
+    {
+      "id": "e01-9",
+      "action": "broadcast",
+      "desc": "B{轮次}-d01 — D01 goals 已更新",
+      "condition": "{{GOALS_CHANGED}} == 'true' || {{IS_FIRST}} == 'true'",
+      "code": "B{{CURRENT_ROUND_PADDED}}-d01"
+    },
+    {
+      "id": "e01-10",
+      "action": "broadcast",
+      "desc": "B{当前常量} — 通知 301 交叉验证（stp 监听点：引擎执行器在每步前检查 STOPPED 状态）",
+      "code": "B{{CURRENT_ROUND_PADDED}}"
+    },
+    {
+      "id": "e01-11",
+      "action": "rename_project",
+      "desc": "用项目名更新 project-index.json",
+      "new_name": "{{PROJECT_NAME}}"
+    }
+  ],
+  "variables": {
+    "CURRENT_MODEL": "引擎注入",
+    "USER_MESSAGES": "引擎自动提取",
+    "MODEL_MESSAGES": "引擎自动提取",
+    "TIMESTAMP": "引擎注入",
+    "NOW": "引擎注入",
+    "GOALS_CHANGED": "引擎判定",
+    "CLEAN_CONTENT": "parse 提取",
+    "IS_FIRST": "引擎判断",
+    "PROJECT_NAME": "parse 提取",
+    "SIMILARITY": "parse 提取"
+  }
+}

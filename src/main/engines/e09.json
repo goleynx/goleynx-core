@@ -1,0 +1,420 @@
+{
+  "code": "C0001-e09",
+  "sender": "c",
+  "senderName": "审查窗",
+  "receiver": "c",
+  "receiverName": "审查窗",
+  "description": "E09 历史代码纠查（301 第二张脸）。init 模式由 e08 收敛闸门链式调起（目标变化+开发步骤重抽双标记同时满足，且非首轮）；reconcile 模式由窗口历史纠查送审 {窗}{轮}-rc{版}-{迭} 触发。定向漂移检测→分区派单(C{轮}-rc{版}-{迭}-{窗})→窗口修正历史代码→复核(R{轮}记录)→不通过发 C{轮}-rc 驳回≤6次→全部对齐后做架构一致性检查并补架构同步段→发 off。",
+  "trigger": {
+    "pattern": "^[A-Z]\\d{4}-rc\\d{2}-\\d{2}$",
+    "listener": "c",
+    "max_iterations": 6
+  },
+  "round": "0001",
+  "steps": [
+    {
+      "id": "e09-i1",
+      "action": "read_file",
+      "desc": "读纠查标记（e07 写入：targetChanged/devStepsUpdated/historicalDone）",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile'",
+      "input": "runtime/reconcile/{{CURRENT_ROUND_PADDED}}.json",
+      "output_key": "RECONCILE_MARK_RAW",
+      "fallback": "{}"
+    },
+    {
+      "id": "e09-i2",
+      "action": "parse",
+      "desc": "解析纠查标记",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile'",
+      "input_key": "RECONCILE_MARK_RAW",
+      "rules": {
+        "TARGET_CHANGED": "match:\"targetChanged\"\\s*:\\s*(true|false)",
+        "DEV_STEPS_UPDATED": "match:\"devStepsUpdated\"\\s*:\\s*(true|false)",
+        "HISTORICAL_DONE": "match:\"historicalDone\"\\s*:\\s*(true|false)"
+      },
+      "output_key": "RECONCILE_MARK_PARSED"
+    },
+    {
+      "id": "e09-i3",
+      "action": "syslog",
+      "desc": "系统日志：启动历史纠查",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile'",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[纠查窗] 第 {{CURRENT_ROUND_PADDED}} 轮 目标已变化且开发步骤已重抽 → 启动历史代码纠查（init）"
+        }
+      ]
+    },
+    {
+      "id": "e09-i4",
+      "action": "read_file",
+      "desc": "读最新架构树（纠查标尺）",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile'",
+      "input": "runtime/arch-files.json",
+      "output_key": "ARCHITECTURE"
+    },
+    {
+      "id": "e09-i5",
+      "action": "read_file",
+      "desc": "读当前 S 组步骤（漂移检测需排除当前正在送审的文件）",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile'",
+      "input": "runtime/steps/d{{CURRENT_ROUND_PADDED}}/s{{CURRENT_ROUND_PADDED}}.json",
+      "output_key": "CURRENT_STEP_RAW",
+      "fallback": "{}"
+    },
+    {
+      "id": "e09-i6",
+      "action": "list_workspace",
+      "desc": "列出 workspace 全部文件（供漂移检测与最终架构一致性核对）",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile'"
+    },
+    {
+      "id": "e09-i7",
+      "action": "llm_call",
+      "desc": "LLM 定向漂移检测：对照新架构，从 workspace 历史文件中找出偏离新架构、且不在当前 S 组的文件",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile'",
+      "sourceName": "审查窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是 Goleynx 架构纠查专家（301 审查窗）。项目目标对齐已变化、架构树已更新，但历史代码仍是旧架构写的。你的任务是找出【偏离新架构的历史文件】，交由执行窗按新架构修正。\n\n规则：\n1. 只关注历史文件，【绝对不要】列出当前正在送审的开发组文件（下面『当前 S 组步骤』里的文件）。\n2. 对照『最新架构树』，找出结构/依赖/接口/职责与新架构冲突的历史文件（如旧模块、被改名/拆分/合并的模块、引用了已不存在的接口等）。\n3. 输出必须是 workspace/ 开头的真实文件路径，每行一个，不要任何其他文字。\n4. 如果经过核对没有发现任何偏离新架构的历史文件，只输出一行 NONE。",
+      "user_prompt_template": "## 最新架构树：\n{{ARCHITECTURE}}\n\n## 当前 S 组步骤（这些文件正在送审，必须排除，不要列入）：\n{{CURRENT_STEP_RAW}}\n\n## workspace 全部文件清单：\n{{WORKSPACE_FILES}}\n\n请输出需要按新架构修正的历史文件路径（workspace/ 开头，每行一个；无则输出 NONE）。",
+      "output_key": "DRIFT_RAW"
+    },
+    {
+      "id": "e09-i8",
+      "action": "prepare_dispatch",
+      "desc": "从漂移检测文本提取 workspace 文件路径清单 + 读取已开执行体窗口数",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile'",
+      "input_key": "DRIFT_RAW"
+    },
+    {
+      "id": "e09-i8b",
+      "action": "syslog",
+      "desc": "未发现漂移历史文件，无需纠查",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile' && {{TOTAL_FILES}} == '0'",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[纠查窗] 第 {{CURRENT_ROUND_PADDED}} 轮 未发现偏离新架构的历史文件，无需纠查，直接收尾"
+        }
+      ]
+    },
+    {
+      "id": "e09-i8c",
+      "action": "write_file",
+      "desc": "无漂移 → 直接置 historicalDone 收尾",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile' && {{TOTAL_FILES}} == '0'",
+      "input": "runtime/reconcile/{{CURRENT_ROUND_PADDED}}.json",
+      "content_template": "{\"round\":\"{{CURRENT_ROUND_PADDED}}\",\"targetChanged\":{{TARGET_CHANGED}},\"devStepsUpdated\":{{DEV_STEPS_UPDATED}},\"kWindows\":0,\"historicalDone\":true}"
+    },
+    {
+      "id": "e09-i8d",
+      "action": "broadcast",
+      "desc": "无漂移 → 直接发 off 收尾",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile' && {{TOTAL_FILES}} == '0'",
+      "code": "off{{CURRENT_ROUND_PADDED}}"
+    },
+    {
+      "id": "e09-i9",
+      "action": "llm_call",
+      "desc": "LLM 分区决策：把漂移文件分配给已开窗口（全覆盖、零重复、不超开窗口数）",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile' && {{TOTAL_FILES}} != '0'",
+      "sourceName": "审查窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是 Goleynx 调度专家。下面是一批需要按新架构修正的历史文件清单，以及当前已开的执行体窗口数。请把文件均衡分配给各执行体窗口（用字母 d/e/f… 标识），确保：1) 每个文件恰好分配给一个窗口；2) 覆盖全部文件、零重复；3) 使用的窗口数不超过已开窗口数。\n\n返回严格 JSON：{\"d\":[\"workspace/...\",\"...\"],\"e\":[...], ...}",
+      "user_prompt_template": "## 待分配历史文件（共 {{TOTAL_FILES}} 个）：\n{{FILE_PATHS_JOINED}}\n\n## 已开执行体窗口数：{{OPENED_WINDOWS}}\n\n请返回分区 JSON。",
+      "output_key": "PARTITION_RAW"
+    },
+    {
+      "id": "e09-i10",
+      "action": "apply_partition",
+      "desc": "校验+规范化模型分区；失败回退取模",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile' && {{TOTAL_FILES}} != '0'"
+    },
+    {
+      "id": "e09-i11",
+      "action": "foreach_executor",
+      "desc": "给每个领到漂移文件的窗口写纠查工单 + 广播 C{轮}-rc01-01-{窗}",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile' && {{TOTAL_FILES}} != '0'",
+      "steps": [
+        {
+          "id": "e09-i11-1",
+          "action": "write_file",
+          "desc": "写纠查工单（C 族：301 下发给窗口的重修指令）",
+          "input": "runtime/reconcile/C{{CURRENT_ROUND_PADDED}}-rc01-01-{{CURRENT_EXECUTOR}}.json",
+          "content": {
+            "round": "{{CURRENT_ROUND_PADDED}}",
+            "version": "01",
+            "iter": "01",
+            "executor": "{{CURRENT_EXECUTOR}}",
+            "directive": "按最新架构树修正以下历史文件，使其重新符合新架构：\n{{CURRENT_FILE_SUBSET}}\n\n（这些文件是偏离新架构的历史代码，请严格以最新架构树为标尺修正，不要改动其他文件。）"
+          }
+        },
+        {
+          "id": "e09-i11-2",
+          "action": "broadcast",
+          "desc": "广播纠查工单信标（C 族，301→窗口）",
+          "code": "C{{CURRENT_ROUND_PADDED}}-rc01-01-{{CURRENT_EXECUTOR}}"
+        }
+      ]
+    },
+    {
+      "id": "e09-i12",
+      "action": "write_file",
+      "desc": "回填纠查标记：写入实际领任务的窗口数 kWindows（收敛分母），保留 targetChanged/devStepsUpdated",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile' && {{TOTAL_FILES}} != '0'",
+      "input": "runtime/reconcile/{{CURRENT_ROUND_PADDED}}.json",
+      "content_template": "{\"round\":\"{{CURRENT_ROUND_PADDED}}\",\"targetChanged\":{{TARGET_CHANGED}},\"devStepsUpdated\":{{DEV_STEPS_UPDATED}},\"kWindows\":{{DISPATCH_COUNT}},\"historicalDone\":false}"
+    },
+    {
+      "id": "e09-i13",
+      "action": "syslog",
+      "desc": "系统日志：已下发纠查工单",
+      "condition": "{{TRIGGER_MODE}} != 'reconcile' && {{TOTAL_FILES}} != '0'",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[纠查窗] 第 {{CURRENT_ROUND_PADDED}} 轮 已向 {{DISPATCH_COUNT}} 个窗口下发历史纠查工单（共 {{TOTAL_FILES}} 个漂移文件）"
+        }
+      ]
+    },
+    {
+      "id": "e09-r1",
+      "action": "syslog",
+      "desc": "系统日志：收到窗口历史纠查送审",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile'",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[纠查窗] 收到 {{TRIGGER_EXECUTOR}}{{CURRENT_ROUND_PADDED}}-rc{{TRIGGER_RECONCILE_VERSION}}-{{TRIGGER_RECONCILE_ITERATION}} 历史纠查送审 → 复核"
+        }
+      ]
+    },
+    {
+      "id": "e09-r2",
+      "action": "read_file",
+      "desc": "读窗口写回的修正结果摘要",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile'",
+      "input": "runtime/reconcile/C{{CURRENT_ROUND_PADDED}}-rc{{TRIGGER_RECONCILE_VERSION}}-{{TRIGGER_RECONCILE_ITERATION}}-{{TRIGGER_EXECUTOR}}-result.json",
+      "output_key": "CHANGE_SUMMARY_RAW",
+      "fallback": "{}"
+    },
+    {
+      "id": "e09-r3",
+      "action": "read_file",
+      "desc": "读最新架构树（复核标尺）",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile'",
+      "input": "runtime/arch-files.json",
+      "output_key": "ARCHITECTURE"
+    },
+    {
+      "id": "e09-r4",
+      "action": "llm_call",
+      "desc": "LLM 复核：窗口修正后的历史文件是否符合新架构",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile'",
+      "sourceName": "审查窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是 Goleynx 首席审查官（301 审查窗）。只审查不写码。一个执行窗刚按最新架构树修正了一批历史文件，请你复核这些修正是否真正符合新架构。\n\n审查维度：\n1. 结构合规：文件位置/模块划分是否符合新架构树。\n2. 依赖合规：是否清除了与新架构冲突的旧依赖/旧接口引用。\n3. 接口契约：导出的接口/类型是否对齐新架构定义。\n4. 无副作用：是否误改了工单未列出的文件。\n\n严格按以下 XML 返回：\n<result>\n  <passed>true或false</passed>\n  <summary>一句话结论</summary>\n  <reject_files>不通过时列出仍需修正的文件(workspace/开头,每行一个)，通过则为空</reject_files>\n  <instructions>不通过时给出简明修正指令，通过则为空</instructions>\n</result>",
+      "user_prompt_template": "## 最新架构树：\n{{ARCHITECTURE}}\n\n## 窗口修正结果摘要（含已修正文件清单）：\n{{CHANGE_SUMMARY_RAW}}\n\n请复核这些历史文件修正是否符合新架构。",
+      "output_key": "REVIEW_RAW"
+    },
+    {
+      "id": "e09-r5",
+      "action": "parse",
+      "desc": "解析复核结果",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile'",
+      "input_key": "REVIEW_RAW",
+      "rules": {
+        "passed": "match:<passed>(.*?)</passed>",
+        "summary": "match:<summary>(.*?)</summary>",
+        "reject_files": "match:<reject_files>([\\s\\S]*?)</reject_files>",
+        "instructions": "match:<instructions>([\\s\\S]*?)</instructions>"
+      },
+      "output_key": "REVIEW_PARSED"
+    },
+    {
+      "id": "e09-r6",
+      "action": "write_file",
+      "desc": "写 R{轮} 复核记录（与当前送审 plain 轮次区分）",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile'",
+      "input": "runtime/panels/c/reviews.json",
+      "append_array": true,
+      "content": {
+        "round": "R{{CURRENT_ROUND_PADDED}}",
+        "id": "e09-{{NOW}}",
+        "timestamp": "{{TIMESTAMP}}",
+        "fileName": "{{TRIGGER_EXECUTOR}}{{CURRENT_ROUND_PADDED}}-rc{{TRIGGER_RECONCILE_VERSION}}-{{TRIGGER_RECONCILE_ITERATION}}",
+        "executor": "{{TRIGGER_EXECUTOR}}",
+        "reviewType": "第 {{CURRENT_ROUND_PADDED}} 轮历史纠查 {{TRIGGER_EXECUTOR}} {{TRIGGER_RECONCILE_ITERATION == '01' ? '首次复核' : ('复审·第' + TRIGGER_RECONCILE_ITERATION + '次送审')}}",
+        "status": "{{PASSED == 'true' ? 'pass' : 'reject'}}",
+        "reason": "{{SUMMARY}}"
+      }
+    },
+    {
+      "id": "e09-r7",
+      "action": "write_file",
+      "desc": "写 301 终端（历史纠查复核意见）",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile'",
+      "input": "runtime/terminals/c/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "C{{CURRENT_ROUND_PADDED}}-mrc",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "[e09 历史纠查复核] {{TRIGGER_EXECUTOR}} rc{{TRIGGER_RECONCILE_VERSION}}-{{TRIGGER_RECONCILE_ITERATION}} {{PASSED == 'true' ? '✅ 通过' : '❌ 打回'}} — {{SUMMARY}}"
+      }
+    },
+    {
+      "id": "e09-r8",
+      "action": "syslog",
+      "desc": "系统日志：复核通过/打回",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile'",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[纠查窗] {{TRIGGER_EXECUTOR}} 历史纠查 rc{{TRIGGER_RECONCILE_VERSION}}-{{TRIGGER_RECONCILE_ITERATION}} {{PASSED == 'true' ? '✅ 通过' : '❌ 打回'}} — {{SUMMARY}}"
+        }
+      ]
+    },
+    {
+      "id": "e09-r9",
+      "action": "write_file",
+      "desc": "❌ 不通过 → 写驳回意见文件（C 族，301→窗口，迭代同本次送审；原工单文件保留不动）",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile' && {{PASSED}} != 'true'",
+      "input": "runtime/reconcile/C{{CURRENT_ROUND_PADDED}}-rc{{TRIGGER_RECONCILE_VERSION}}-{{TRIGGER_RECONCILE_ITERATION}}-{{TRIGGER_EXECUTOR}}-reject.json",
+      "content": {
+        "round": "{{CURRENT_ROUND_PADDED}}",
+        "version": "{{TRIGGER_RECONCILE_VERSION}}",
+        "iter": "{{TRIGGER_RECONCILE_ITERATION}}",
+        "executor": "{{TRIGGER_EXECUTOR}}",
+        "rejectNote": "301 审查打回：{{SUMMARY}}\n\n需重写文件：\n{{REJECT_FILES}}\n\n修正要求：{{INSTRUCTIONS}}"
+      }
+    },
+    {
+      "id": "e09-r10",
+      "action": "broadcast",
+      "desc": "❌ 不通过 → 发 C{轮}-rc{版}-{迭}-{窗} 驳回（窗口迭代+1 再送审）",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile' && {{PASSED}} != 'true'",
+      "code": "C{{CURRENT_ROUND_PADDED}}-rc{{TRIGGER_RECONCILE_VERSION}}-{{TRIGGER_RECONCILE_ITERATION}}-{{TRIGGER_EXECUTOR}}"
+    },
+    {
+      "id": "e09-r11",
+      "action": "check_reconcile",
+      "desc": "历史纠查收敛：统计 R{轮} 通过窗口数，全过则置 historicalDone + OFF_READY",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile'"
+    },
+    {
+      "id": "e09-r12",
+      "action": "list_workspace",
+      "desc": "列出 workspace 全部文件（架构一致性核对用）",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile' && {{ALL_PASSED_RECONCILE}} == 'true'"
+    },
+    {
+      "id": "e09-r13",
+      "action": "llm_call",
+      "desc": "最终架构一致性核对：全部本地代码是否对齐最新架构树；若不一致输出需更新的架构同步段",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile' && {{ALL_PASSED_RECONCILE}} == 'true'",
+      "sourceName": "审查窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是 Goleynx 架构一致性审查专家（301 审查窗）。历史代码纠查已全部通过，现在做最后一道关：核对『全部本地代码』是否与『最新架构树』逻辑一致。\n\n重点核对：\n1. workspace 里的文件是否都能在架构树中找到对应位置/模块（无架构树未记录的游离文件）。\n2. 架构树描述的模块是否都已落地为文件（无架构树描述但代码缺失的幽灵模块）。\n3. 命名/路径/依赖是否与架构树一致。\n\n如果一致，返回 <changed>false</changed>。\n如果不一致，返回 <changed>true</changed> 并在 <sync_section> 内给出一段应追加进 architecture.md 的『架构同步（第X轮历史纠查）』Markdown 小节，记录本次纠查触及的模块、文件及结构变化，使架构文档与代码重新一致。\n\n严格按 XML 返回：\n<result>\n  <changed>true或false</changed>\n  <sync_section>不一致时给出架构同步段 Markdown；一致时为空</sync_section>\n</result>",
+      "user_prompt_template": "## 最新架构树：\n{{ARCHITECTURE}}\n\n## workspace 全部文件清单：\n{{WORKSPACE_FILES}}\n\n请核对全部本地代码是否与架构树一致，并给出结论。",
+      "output_key": "ARCH_CHECK_RAW"
+    },
+    {
+      "id": "e09-r14",
+      "action": "parse",
+      "desc": "解析架构一致性核对结果",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile' && {{ALL_PASSED_RECONCILE}} == 'true'",
+      "input_key": "ARCH_CHECK_RAW",
+      "rules": {
+        "changed": "match:<changed>(.*?)</changed>",
+        "sync_section": "match:<sync_section>([\\s\\S]*?)</sync_section>"
+      },
+      "output_key": "ARCH_CHECK_PARSED"
+    },
+    {
+      "id": "e09-r14a",
+      "action": "list_workspace",
+      "desc": "扫描 workspace 全部文件 → 写入机器可读架构清单",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile' && {{ALL_PASSED_RECONCILE}} == 'true'"
+    },
+    {
+      "id": "e09-r14b",
+      "action": "write_file",
+      "desc": "覆盖写入机器可读架构清单 → runtime/arch-files.json",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile' && {{ALL_PASSED_RECONCILE}} == 'true'",
+      "input": "runtime/arch-files.json",
+      "content_template": "# D03 第 {{CURRENT_ROUND_PADDED}} 轮 · E09 架构同步 · {{WORKSPACE_FILE_COUNT}} 文件\n{{WORKSPACE_FILES}}"
+    },
+    {
+      "id": "e09-r15",
+      "action": "write_file",
+      "desc": "架构不一致 → 追加架构同步段到 architecture.md（保持架构与代码一致）",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile' && {{ALL_PASSED_RECONCILE}} == 'true' && {{CHANGED}} == 'true'",
+      "input": "core/architecture.md",
+      "core_append": true,
+      "content_template": "\n\n---\n\n## d03 第 {{CURRENT_ROUND_PADDED}} 轮 架构同步（E09）\n\n> 本轮目标对齐变化后，历史代码已按新架构修正完毕。以下为对齐记录：\n\n{{SYNC_SECTION}}"
+    },
+    {
+      "id": "e09-r16",
+      "action": "syslog",
+      "desc": "系统日志：架构一致性核对完成",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile' && {{ALL_PASSED_RECONCILE}} == 'true'",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[纠查窗] 第 {{CURRENT_ROUND_PADDED}} 轮 历史代码已对齐新架构；架构一致性核对：{{CHANGED == 'true' ? '已更新架构同步段' : '无需更新'}}"
+        }
+      ]
+    },
+    {
+      "id": "e09-r17",
+      "action": "broadcast",
+      "desc": "全部对齐 → 发 off{轮}（结束本轮，进入下一轮）",
+      "condition": "{{TRIGGER_MODE}} == 'reconcile' && {{OFF_READY}} == 'true'",
+      "code": "off{{CURRENT_ROUND_PADDED}}"
+    }
+  ],
+  "variables": {
+    "CURRENT_MODEL": "引擎注入",
+    "CURRENT_ROUND_PADDED": "引擎注入（4位轮次）",
+    "RECONCILE_MARK_RAW": "read_file 提取",
+    "TARGET_CHANGED": "parse 提取",
+    "DEV_STEPS_UPDATED": "parse 提取",
+    "HISTORICAL_DONE": "parse 提取",
+    "ARCHITECTURE": "read_file 提取 core/architecture.md",
+    "CURRENT_STEP_RAW": "read_file 提取 当前 S 组",
+    "WORKSPACE_FILES": "list_workspace 注入",
+    "DRIFT_RAW": "llm_call 提取 漂移文件清单",
+    "FILE_PATHS": "prepare_dispatch 注入",
+    "FILE_PATHS_JOINED": "prepare_dispatch 注入",
+    "OPENED_WINDOWS": "prepare_dispatch 注入",
+    "TOTAL_FILES": "prepare_dispatch 注入",
+    "PARTITION_RAW": "llm_call 提取 分区决策",
+    "EXECUTORS": "apply_partition 注入",
+    "FILE_SPLITS": "apply_partition 注入",
+    "DISPATCH_COUNT": "apply_partition 注入",
+    "CHANGE_SUMMARY_RAW": "read_file 提取 窗口修正结果",
+    "REVIEW_RAW": "llm_call 提取",
+    "PASSED": "parse 提取",
+    "SUMMARY": "parse 提取",
+    "REJECT_FILES": "parse 提取",
+    "INSTRUCTIONS": "parse 提取",
+    "TRIGGER_EXECUTOR": "RC 信标解析注入",
+    "TRIGGER_RECONCILE_VERSION": "RC 信标解析注入",
+    "TRIGGER_RECONCILE_ITERATION": "RC 信标解析注入",
+    "ALL_PASSED_RECONCILE": "check_reconcile 注入",
+    "OFF_READY": "check_reconcile 注入",
+    "ARCH_CHECK_RAW": "llm_call 提取",
+    "CHANGED": "parse 提取 架构是否变化",
+    "SYNC_SECTION": "parse 提取 架构同步段",
+    "TIMESTAMP": "引擎注入",
+    "NOW": "引擎注入"
+  }
+}

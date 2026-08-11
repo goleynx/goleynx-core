@@ -1,0 +1,185 @@
+{
+  "code": "B0001-e05",
+  "sender": "b",
+  "senderName": "中枢窗",
+  "receiver": "b",
+  "receiverName": "中枢窗",
+  "description": "201 收到 C{当前常量} → 读架构+需求+目标 → LLM 生成完整开发规划 → 写 D05 steps.md → 发 B{轮次}-d05",
+  "trigger": {
+    "pattern": "^C\\d{4}(?:-00)?$",
+    "listener": "b"
+  },
+  "round": "0001",
+  "steps": [
+    {
+      "id": "e05-1",
+      "action": "read_file",
+      "desc": "读架构树 (D03)",
+      "input": "runtime/arch-files.json",
+      "output_key": "ARCHITECTURE"
+    },
+    {
+      "id": "e05-1b",
+      "action": "read_file",
+      "desc": "读架构重生标记 → 判定是否是架构变化触发的 REGEN 模式",
+      "input": "runtime/arch-regen.json",
+      "output_key": "REGEN_RAW",
+      "fallback": "{}"
+    },
+    {
+      "id": "e05-1c",
+      "action": "parse",
+      "desc": "解析 REGEN_MODE：存在 source=E08/E09 即为架构重生触发",
+      "input_key": "REGEN_RAW",
+      "rules": {
+        "REGEN_MODE": "match:\"source\"\\s*:\\s*\"(E0[89])\""
+      },
+      "output_key": "REGEN_PARSED"
+    },
+    {
+      "id": "e05-2",
+      "action": "read_file",
+      "desc": "读需求清单 (D02)",
+      "input": "core/requirements.md",
+      "output_key": "REQUIREMENTS"
+    },
+    {
+      "id": "e05-3",
+      "action": "read_file",
+      "desc": "读目标对齐 (D01)",
+      "input": "core/goals.md",
+      "output_key": "GOALS"
+    },
+    {
+      "id": "e05-4",
+      "action": "llm_call",
+      "desc": "LLM 生成完整开发规划",
+      "sourceName": "中枢窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是首席项目编排专家。基于目标对齐/需求清单/架构树，制定分批开发清单。\n\n核心原则：\n1. 必须将所有文件全部分配完毕，不能遗漏\n2. UI 先行 — 前 3 组必须是 UI 页面和组件，用 Mock 数据让项目能跑\n3. 配置后置 — 全局配置放在第 4 组之后\n4. 逻辑最后 — 状态管理/API/业务逻辑放在 UI 和配置之后\n5. 每组建议3-8个文件，关联性强的放一起\n6. 每组必须说明：拆分理由、包含文件、完成效果\n\n排版要求：\n- 使用纯净 Markdown（### 第N组 [sNNNN] / 拆分理由 / 包含文件 / 完成效果）\n- 每组编号 [sNNNN]，NNNN 从 0001 开始递增（与当前轮次无关，第1组永远是[s0001]）\n- 所有文件路径必须是 workspace/ 开头的绝对路径\n\n严格按以下 XML 返回：\n<result>\n  <total_files>总文件数</total_files>\n  <total_groups>总组数</total_groups>\n  <summary>编排总览（1-2句）</summary>\n  <full_plan>\n### 第1组 [s0001] — {组名}\n\n**拆分理由**：为什么这样拆\n**包含文件**：\n- workspace/xxx.tsx\n**完成效果**：这组完成后能达到什么状态\n\n### 第2组 [s0002] — {组名}\n...\n  </full_plan>\n</result>",
+      "user_prompt_template": "## 当前轮次：{{CURRENT_ROUND_PADDED}}\n\n## 架构树：\n{{ARCHITECTURE}}\n\n## 需求清单：\n{{REQUIREMENTS}}\n\n## 目标对齐：\n{{GOALS}}",
+      "output_key": "steps_raw"
+    },
+    {
+      "id": "e05-5",
+      "action": "parse",
+      "desc": "解析全部批次",
+      "input_key": "steps_raw",
+      "rules": {
+        "total_files": "match:<total_files>(.*?)</total_files>",
+        "total_groups": "match:<total_groups>(.*?)</total_groups>",
+        "summary": "match:<summary>(.*?)</summary>",
+        "full_plan": "match:<full_plan>([\\s\\S]*?)</full_plan>"
+      },
+      "output_key": "steps_parsed"
+    },
+    {
+      "id": "e05-6",
+      "action": "write_file",
+      "desc": "写入最新开发步骤到 steps.md（含时间戳）",
+      "core_append": true,
+      "input": "core/steps.md",
+      "content_template": "\n## d05 第 {{CURRENT_ROUND_PADDED}} 轮 开发步骤更新\n\n> 依据：architecture.md（{{TOTAL_FILES}} 文件）+ requirements.md + goals.md\n\n### 📊 总体览\n{{SUMMARY}}\n共 {{TOTAL_FILES}} 个文件，拆解为 {{TOTAL_GROUPS}} 组。\n\n### 📋 完整分批清单\n\n{{FULL_PLAN}}\n\n---"
+    },
+    {
+      "id": "e05-7",
+      "action": "write_file",
+      "desc": "写入 201 终端（保存码 B{当前常量}-m01）",
+      "input": "runtime/terminals/b/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "B{{CURRENT_ROUND_PADDED}}-m01",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "[中枢] 第 {{CURRENT_ROUND_PADDED}} 轮 开发步骤 📊 {{TOTAL_FILES}} 文件 → {{TOTAL_GROUPS}} 组\n\n---"
+      }
+    },
+    {
+      "id": "e05-8",
+      "action": "syslog",
+      "desc": "系统日志",
+      "entries": [
+        {
+          "category": "中枢",
+          "sourceName": "中枢窗",
+          "message": "[中枢窗] 第 {{CURRENT_ROUND_PADDED}} 轮开发步骤已更新 — 分 {{TOTAL_GROUPS}} 组"
+        }
+      ]
+    },
+    {
+      "id": "e05-9",
+      "action": "write_file",
+      "desc": "面板状态（追加）",
+      "input": "runtime/panels/b/statuses.json",
+      "append_array": true,
+      "content": {
+        "round": "{{CURRENT_ROUND_PADDED}}",
+        "id": "steps-{{NOW}}",
+        "timestamp": "{{TIMESTAMP}}",
+        "type": "开发步骤",
+        "message": "📋 第 {{CURRENT_ROUND_PADDED}} 轮开发步骤已更新 — 分 {{TOTAL_GROUPS}} 组",
+        "totalGroups": "{{TOTAL_GROUPS}}"
+      }
+    },
+    {
+      "id": "e05-10",
+      "action": "broadcast",
+      "desc": "B{轮次}-d05 — D05 steps 已更新（文件更新通知，给读取方用）",
+      "code": "B{{CURRENT_ROUND_PADDED}}-d05"
+    },
+    {
+      "id": "e05-11",
+      "action": "split_steps",
+      "desc": "将开发步骤各组拆分为独立 JSON 写入 runtime/steps/d{轮次}/",
+      "input_key": "FULL_PLAN",
+      "round": "{{CURRENT_ROUND_PADDED}}"
+    },
+    {
+      "id": "e05-12",
+      "action": "syslog",
+      "desc": "系统日志：步骤已全部拆分写入本地目录",
+      "entries": [
+        {
+          "category": "中枢",
+          "sourceName": "中枢窗",
+          "message": "开发步骤在 {{CURRENT_ROUND_PADDED}} 轮里边的所有步骤，共 {{TOTAL_GROUPS}} 个步骤，已全部单独拆分写入到本地 D{{CURRENT_ROUND_PADDED}} 目录下边"
+        }
+      ]
+    },
+    {
+      "id": "e05-10b",
+      "action": "broadcast",
+      "desc": "B{轮次}-s{轮次}-00 — 触发 e10 调度引擎（REGEN 模式下跳过）",
+      "condition": "{{REGEN_MODE}} == ''",
+      "code": "B{{CURRENT_ROUND_PADDED}}-s{{CURRENT_ROUND_PADDED}}-00"
+    },
+    {
+      "id": "e05-13",
+      "action": "write_file",
+      "desc": "REGEN 模式 → 清除架构重生标记",
+      "condition": "{{REGEN_MODE}} == 'E08' || {{REGEN_MODE}} == 'E09'",
+      "input": "runtime/arch-regen.json",
+      "content_template": "{}"
+    },
+    {
+      "id": "e05-14",
+      "action": "broadcast",
+      "desc": "B{轮次}-00 — 通知 E08/E09 架构重生步骤已完成",
+      "condition": "{{REGEN_MODE}} == 'E08' || {{REGEN_MODE}} == 'E09'",
+      "code": "B{{CURRENT_ROUND_PADDED}}-00"
+    }
+  ],
+  "variables": {
+    "CURRENT_MODEL": "引擎注入",
+    "REGEN_MODE": "parse 提取（架构重生触发源 E08/E09）",
+    "ARCHITECTURE": "read_file 提取",
+    "REQUIREMENTS": "read_file 提取",
+    "GOALS": "read_file 提取",
+    "TOTAL_FILES": "parse 提取",
+    "TOTAL_GROUPS": "parse 提取",
+    "SUMMARY": "parse 提取",
+    "FULL_PLAN": "parse 提取",
+    "TIMESTAMP": "引擎注入",
+    "NOW": "引擎注入"
+  }
+}

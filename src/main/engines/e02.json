@@ -1,0 +1,200 @@
+{
+  "code": "C0001-e02",
+  "sender": "c",
+  "senderName": "审查窗",
+  "receiver": "c",
+  "receiverName": "审查窗",
+  "description": "301 根据 D01 目标对齐生成 D02 需求清单 → 等待用户确认 → 写入 requirements.md → 链式调用 e03",
+  "trigger": {
+    "pattern": null,
+    "listener": "c"
+  },
+  "round": "0001",
+  "steps": [
+    {
+      "id": "e02-1",
+      "action": "read_file",
+      "desc": "读取目标对齐 (D01)",
+      "input": "core/goals.md",
+      "output_key": "GOALS"
+    },
+    {
+      "id": "e02-2",
+      "action": "read_file",
+      "desc": "读取 101 对话",
+      "input": "runtime/terminals/a/conversations.json",
+      "output_key": "conversations_2000"
+    },
+    {
+      "id": "e02-2b",
+      "action": "read_file",
+      "desc": "读取已有 requirements.md (D02) 用于比较",
+      "input": "core/requirements.md",
+      "output_key": "CURRENT_REQUIREMENTS",
+      "fallback": ""
+    },
+    {
+      "id": "e02-3",
+      "action": "llm_call",
+      "desc": "生成顶层目录需求 + 跟已有需求清单比较",
+      "sourceName": "审查窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是项目架构分析专家。根据目标对齐文件和原始对话，设计项目的顶层目录结构。\n\n当前轮次：{{CURRENT_ROUND_PADDED}}\n\n任务：\n1. 阅读目标对齐和 101 对话\n2. 生成顶层目录需求\n3. 跟已有需求清单比较，计算相似度（0-100）\n4. 判断需求是否发生变化\n\n判断规则：\n- 相似度 >= 80：changed=false（需求未变化）\n- 相似度 < 80：changed=true（需求已变化）\n- 如果已有需求清单为空（第 1 轮），changed=true\n\n设计原则（changed=true 时执行）：\n1. 每个顶层目录必须对应一条明确的业务需求或技术职责\n2. 每条需求必须在原始对话中有依据（引用用户原文）\n3. 顶层目录应覆盖三类：业务模块 + 公共基础设施 + 工具/配置\n4. 目录命名跟项目类型匹配\n5. 不要超过 8 个顶层目录（保持精简）\n\n以下是不同项目类型的顶层目录示例（仅供参考，不是要求，请根据实际项目特点设计）：\n\nWeb 项目示例：pages/ components/ api/ store/ utils/ config/\n安卓项目示例：feature/ ui/ data/ domain/ utils/ res/\n鸿蒙项目示例：pages/ views/ common/ model/ utils/ resources/\n桌面项目示例：src/ main/ renderer/ assets/ utils/ config/\n\n严格按以下 XML 返回：\n\n<result>\n  <changed>true或false</changed>\n  <similarity>0-100</similarity>\n  <project_type>项目类型</project_type>\n  <summary>需求清单总览（1-2 句）</summary>\n  <requirements>\n如果 changed=true：\n每个条目格式：\n📁 {目录名}/\n**职责**：一句话\n**依据**：来源于用户原文\"...\"\n\n如果 changed=false：\n需求未发生变化，相似度 XX%（一句话即可，不要重复已有需求内容）\n  </requirements>\n</result>",
+      "user_prompt_template": "## 当前轮次：{{CURRENT_ROUND_PADDED}}\n\n## 目标对齐：\n{{GOALS}}\n\n## 已有需求清单（requirements.md 当前内容）：\n{{CURRENT_REQUIREMENTS}}\n\n## 101 原始对话：\n{{CONVERSATIONS_RAW}}",
+      "output_key": "req_raw"
+    },
+    {
+      "id": "e02-4",
+      "action": "parse",
+      "desc": "解析需求清单",
+      "input_key": "req_raw",
+      "rules": {
+        "changed": "match:<changed>(.*?)</changed>",
+        "similarity": "match:<similarity>(.*?)</similarity>",
+        "project_type": "match:<project_type>(.*?)</project_type>",
+        "summary": "match:<summary>(.*?)</summary>",
+        "requirements": "match:<requirements>([\\s\\S]*?)</requirements>"
+      },
+      "output_key": "req_parsed"
+    },
+    {
+      "id": "e02-5",
+      "action": "write_file",
+      "desc": "301 终端预览（保存码 C{当前常量}-m01）",
+      "input": "runtime/terminals/c/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "C{{CURRENT_ROUND_PADDED}}-m01",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "[审查] 第 {{CURRENT_ROUND_PADDED}} 轮 需求清单 预览\n\n项目类型：{{PROJECT_TYPE}}\n\n{{SUMMARY}}\n\n### 顶层目录需求\n\n{{REQUIREMENTS}}"
+      }
+    },
+    {
+      "id": "e02-6",
+      "action": "write_file",
+      "desc": "301 面板等待确认",
+      "input": "runtime/panels/c/reviews.json",
+      "append_array": true,
+      "content": {
+        "round": "{{CURRENT_ROUND_PADDED}}",
+        "id": "req-{{NOW}}",
+        "timestamp": "{{TIMESTAMP}}",
+        "fileName": "core/requirements.md",
+        "reviewType": "需求清单 第 {{CURRENT_ROUND_PADDED}} 轮",
+        "status": "warn",
+        "reason": "{{SUMMARY}}。等待确认。"
+      }
+    },
+    {
+      "id": "e02-7",
+      "action": "write_file",
+      "desc": "终端写确认提示（保存码 C{当前常量}-m02）",
+      "input": "runtime/terminals/c/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "C{{CURRENT_ROUND_PADDED}}-m02",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "⚠️ **是否确认以上需求清单入库写入？** 30 秒内无回复将自动确认。如需修改请直接在终端对话。"
+      }
+    },
+    {
+      "id": "e02-8",
+      "action": "user_confirm",
+      "desc": "等待用户确认",
+      "confirm_file": "runtime/panels/c/confirm.json",
+      "timeout_ms": 30000,
+      "message": "是否确认以上需求清单入库写入？"
+    },
+    {
+      "id": "e02-9",
+      "action": "write_file",
+      "desc": "写入 D02 requirements.md — 需求已变化时追加本轮内容",
+      "core_append": true,
+      "condition": "({{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout') && ({{CHANGED}} == 'true' || {{IS_FIRST}} == 'true')",
+      "input": "core/requirements.md",
+      "content_template": "\n## d02 第 {{CURRENT_ROUND_PADDED}} 轮 清单更新\n\n项目类型：{{PROJECT_TYPE}}\n\n{{SUMMARY}}\n\n### 顶层目录需求\n\n{{REQUIREMENTS}}\n\n---"
+    },
+    {
+      "id": "e02-9b",
+      "action": "write_file",
+      "desc": "写入 D02 requirements.md — 需求未变化时追加一句话",
+      "core_append": true,
+      "condition": "({{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout') && {{CHANGED}} == 'false' && {{IS_FIRST}} == 'false'",
+      "input": "core/requirements.md",
+      "content_template": "\n## d02 第 {{CURRENT_ROUND_PADDED}} 轮 清单更新\n\n{{REQUIREMENTS}}\n\n---"
+    },
+    {
+      "id": "e02-10",
+      "action": "write_file",
+      "desc": "面板已确认",
+      "input": "runtime/panels/c/reviews.json",
+      "append_array": true,
+      "condition": "{{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout'",
+      "content": {
+        "round": "{{CURRENT_ROUND_PADDED}}",
+        "id": "req-done-{{NOW}}",
+        "timestamp": "{{TIMESTAMP}}",
+        "fileName": "core/requirements.md",
+        "reviewType": "需求清单 第 {{CURRENT_ROUND_PADDED}} 轮",
+        "status": "pass",
+        "reason": "需求清单已确认并写入。"
+      }
+    },
+    {
+      "id": "e02-11",
+      "action": "write_file",
+      "desc": "终端通知（保存码 C{当前常量}-m03）",
+      "input": "runtime/terminals/c/conversations.json",
+      "append_array": true,
+      "condition": "{{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout'",
+      "content": {
+        "round": "C{{CURRENT_ROUND_PADDED}}-m03",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "✅ 需求清单已确认并写入 D02。\n\n---"
+      }
+    },
+    {
+      "id": "e02-12",
+      "action": "syslog",
+      "desc": "系统日志",
+      "condition": "{{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout'",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[审查窗] 第 {{CURRENT_ROUND_PADDED}} 轮需求清单已写入 requirements.md（{{CONFIRM_RESULT == 'confirmed' ? '用户确认' : '自动超时'}}）{{CHANGED == 'false' ? '（未变化）' : ''}}"
+        }
+      ]
+    },
+    {
+      "id": "e02-13",
+      "action": "broadcast",
+      "desc": "C{轮次}-d02 — D02 requirements 已更新",
+      "condition": "{{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout'",
+      "code": "C{{CURRENT_ROUND_PADDED}}-d02"
+    },
+    {
+      "id": "e02-14",
+      "action": "chain_engine",
+      "desc": "链式调用架构树 e03（stp 监听点：STOPPED 时跳过此步）",
+      "chain_code": "e03"
+    }
+  ],
+  "variables": {
+    "CURRENT_MODEL": "引擎注入",
+    "GOALS": "read_file 提取",
+    "CONVERSATIONS_RAW": "引擎自动提取",
+    "CURRENT_REQUIREMENTS": "read_file 提取",
+    "CHANGED": "parse 提取",
+    "SIMILARITY": "parse 提取",
+    "PROJECT_TYPE": "parse 提取",
+    "SUMMARY": "parse 提取",
+    "REQUIREMENTS": "parse 提取",
+    "CONFIRM_RESULT": "user_confirm 写入",
+    "TIMESTAMP": "引擎注入",
+    "NOW": "引擎注入"
+  }
+}

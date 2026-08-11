@@ -1,0 +1,29 @@
+appId: com.goleynx.core
+productName: "Goleynx"
+directories:
+  buildResources: build
+  output: C:/goleynx_dist
+files:
+  - out/**/*
+  - "!node_modules/**/*"
+extraResources:
+  - assets/**
+  - from: src/main/engines
+    to: engines
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: assets/icons/icon.ico
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  installerIcon: assets/icons/icon.ico
+  uninstallerIcon: assets/icons/icon.ico
+  installerHeaderIcon: assets/icons/icon.ico
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: "Goleynx"

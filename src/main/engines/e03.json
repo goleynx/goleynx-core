@@ -1,0 +1,224 @@
+{
+  "code": "C0001-e03",
+  "sender": "c",
+  "senderName": "审查窗",
+  "receiver": "c",
+  "receiverName": "审查窗",
+  "description": "301 根据 D02 需求 + 审查规则生成 D03 架构结构树 → 确认后写入 + scaffold 创建文件 → 发 C{当前常量}",
+  "trigger": {
+    "pattern": null,
+    "listener": "c"
+  },
+  "round": "0001",
+  "steps": [
+    {
+      "id": "e03-1",
+      "action": "read_file",
+      "desc": "读需求清单 (D02)",
+      "input": "core/requirements.md",
+      "output_key": "REQUIREMENTS"
+    },
+    {
+      "id": "e03-2",
+      "action": "read_file",
+      "desc": "读审查规则 (D04)",
+      "input": "core/review-rules.md",
+      "output_key": "REVIEW_RULES"
+    },
+    {
+      "id": "e03-2b",
+      "action": "read_file",
+      "desc": "读取已有 architecture.md (D03) 用于比较",
+      "input": "core/architecture.md",
+      "output_key": "CURRENT_ARCH",
+      "fallback": ""
+    },
+    {
+      "id": "e03-3",
+      "action": "llm_call",
+      "desc": "生成文件结构树 + 跟已有架构比较",
+      "sourceName": "审查窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是项目架构设计师。根据需求清单和审查规则，设计项目文件结构树。\n\n当前轮次：{{CURRENT_ROUND_PADDED}}\n\n任务：\n1. 阅读需求清单 + 审查规则 + 已有架构树\n2. 生成架构\n3. 跟已有架构树比较，计算相似度（0-100）\n4. 判断架构是否变化\n\n判断规则：\n- 相似度 >= 80：changed=false（架构未变化）\n- 相似度 < 80：changed=true（架构已变化）\n- 如果已有架构为空（第 1 轮），changed=true\n\n输出规则：\n- 第 1 轮（changed=true）：写完整结构树 + 完整文件列表（file_list）\n- 第 2 轮起 changed=false：只写\"架构未发生变化，相似度 XX%\"（一句话）\n- 第 2 轮起 changed=true：只写差异（新增/修改的文件夹和文件），不重画整棵树 + 新增文件列表（diff_file_list，用于 scaffold）\n\n结构树设计原则（第 1 轮或 changed=true 时执行）：\n1. 按功能模块分层 — 每个功能模块一个顶层目录\n2. 模块内按职责拆分 — ui/（界面）、logic/（逻辑）、style/（样式）\n3. 公共基础设施单独目录 — api/、store/、utils/、config/\n4. UI 原子化 — 颜色、动画、布局、交互各自独立文件\n5. 路径相对于 workspace/\n6. 遵循审查规则全部 7 条\n\n以下是不同项目类型的结构树示例（仅供参考，不是要求）：\n\nWeb 项目示例：chat/ ui/ logic/ style/ common/ api/ store/ utils/ config/\n安卓项目示例：feature/ ui/ data/ core/ utils/ res/\n鸿蒙项目示例：pages/ views/ common/ model/ utils/ resources/\n\n严格按以下 XML 返回：\n\n<result>\n  <changed>true或false</changed>\n  <similarity>0-100</similarity>\n  <project_type>项目类型</project_type>\n  <summary>架构概述（一句话）</summary>\n  <tree>\n如果 changed=true 且第 1 轮：完整树形结构\n如果 changed=true 且第 2 轮起：差异描述（新增/修改的文件夹和文件，文字说明）\n如果 changed=false：一句话\"架构未发生变化，相似度 XX%\"\n  </tree>\n  <file_list>\n如果第 1 轮：所有文件路径，每行一个\n如果第 2 轮起 changed=true：仅新增文件路径，每行一个\n如果 changed=false：空\n  </file_list>\n</result>",
+      "user_prompt_template": "## 当前轮次：{{CURRENT_ROUND_PADDED}}\n\n## 需求清单：\n{{REQUIREMENTS}}\n\n## 已有架构树（architecture.md 当前内容）：\n{{CURRENT_ARCH}}\n\n## 审查规则：\n{{REVIEW_RULES}}",
+      "output_key": "arch_raw"
+    },
+    {
+      "id": "e03-4",
+      "action": "parse",
+      "desc": "解析结构树",
+      "input_key": "arch_raw",
+      "rules": {
+        "changed": "match:<changed>(.*?)</changed>",
+        "similarity": "match:<similarity>(.*?)</similarity>",
+        "project_type": "match:<project_type>(.*?)</project_type>",
+        "summary": "match:<summary>(.*?)</summary>",
+        "tree": "match:<tree>([\\s\\S]*?)</tree>",
+        "file_list": "match:<file_list>([\\s\\S]*?)</file_list>"
+      },
+      "output_key": "arch_parsed"
+    },
+    {
+      "id": "e03-5",
+      "action": "write_file",
+      "desc": "301 终端预览（保存码 C{当前常量}-m01）",
+      "input": "runtime/terminals/c/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "C{{CURRENT_ROUND_PADDED}}-m01",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "[审查] 第 {{CURRENT_ROUND_PADDED}} 轮 架构结构树 预览\n\n项目类型：{{PROJECT_TYPE}}\n\n{{SUMMARY}}\n\n### 文件结构树\n\n```\n{{TREE}}\n```\n\n共 {{FILE_LIST_COUNT}} 个文件待创建。"
+      }
+    },
+    {
+      "id": "e03-6",
+      "action": "write_file",
+      "desc": "301 面板等待确认",
+      "input": "runtime/panels/c/reviews.json",
+      "append_array": true,
+      "content": {
+        "round": "{{CURRENT_ROUND_PADDED}}",
+        "id": "arch-{{NOW}}",
+        "timestamp": "{{TIMESTAMP}}",
+        "fileName": "core/architecture.md",
+        "reviewType": "架构结构树 第 {{CURRENT_ROUND_PADDED}} 轮",
+        "status": "warn",
+        "reason": "{{SUMMARY}}。{{FILE_LIST_COUNT}} 个文件。"
+      }
+    },
+    {
+      "id": "e03-7",
+      "action": "write_file",
+      "desc": "终端写确认提示（保存码 C{当前常量}-m02）",
+      "input": "runtime/terminals/c/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "C{{CURRENT_ROUND_PADDED}}-m02",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "⚠️ **是否确认以上架构树并创建全部文件？** 30 秒内无回复将自动确认。如需修改请直接在终端对话。"
+      }
+    },
+    {
+      "id": "e03-8",
+      "action": "user_confirm",
+      "desc": "等待用户确认",
+      "confirm_file": "runtime/panels/c/confirm.json",
+      "timeout_ms": 30000,
+      "message": "是否确认以上架构树并创建全部文件？"
+    },
+    {
+      "id": "e03-9",
+      "action": "write_file",
+      "desc": "写入 D03 architecture.md — 第 1 轮或变化时追加完整/差异内容",
+      "core_append": true,
+      "condition": "({{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout') && ({{CHANGED}} == 'true' || {{IS_FIRST}} == 'true')",
+      "input": "core/architecture.md",
+      "content_template": "\n## d03 第 {{CURRENT_ROUND_PADDED}} 轮 架构生成（e03）\n\n项目类型：{{PROJECT_TYPE}}\n\n{{SUMMARY}}\n\n### 文件结构树\n\n```\n{{TREE}}\n```\n\n> 共 {{FILE_LIST_COUNT}} 个文件\n\n---"
+    },
+    {
+      "id": "e03-9b",
+      "action": "write_file",
+      "desc": "写入 D03 architecture.md — 架构未变化时追加一句话",
+      "core_append": true,
+      "condition": "({{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout') && {{CHANGED}} == 'false' && {{IS_FIRST}} == 'false'",
+      "input": "core/architecture.md",
+      "content_template": "\n## d03 第 {{CURRENT_ROUND_PADDED}} 轮 架构更新\n\n{{TREE}}\n\n---"
+    },
+    {
+      "id": "e03-10",
+      "action": "scaffold",
+      "desc": "创建文件（scaffold 空文件到 workspace/，第 1 轮创建全部，第 2 轮起只创建新增）",
+      "condition": "({{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout') && ({{CHANGED}} == 'true' || {{IS_FIRST}} == 'true')"
+    },
+    {
+      "id": "e03-10b",
+      "action": "list_workspace",
+      "desc": "扫描 workspace 全部文件 → 作为机器可读架构清单的数据源（必须在 scaffold 之后执行）",
+      "condition": "({{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout') && ({{CHANGED}} == 'true' || {{IS_FIRST}} == 'true')"
+    },
+    {
+      "id": "e03-10c",
+      "action": "write_file",
+      "desc": "覆盖写入机器可读架构清单 → runtime/arch-files.json（每行一个 workspace/ 路径，机器零歧义读取）",
+      "condition": "({{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout') && ({{CHANGED}} == 'true' || {{IS_FIRST}} == 'true')",
+      "input": "runtime/arch-files.json",
+      "content_template": "# D03 第 {{CURRENT_ROUND_PADDED}} 轮 · e03 架构生成\n{{WORKSPACE_FILES}}"
+    },
+    {
+      "id": "e03-11",
+      "action": "write_file",
+      "desc": "面板已确认",
+      "input": "runtime/panels/c/reviews.json",
+      "append_array": true,
+      "condition": "{{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout'",
+      "content": {
+        "round": "{{CURRENT_ROUND_PADDED}}",
+        "id": "arch-done-{{NOW}}",
+        "timestamp": "{{TIMESTAMP}}",
+        "fileName": "core/architecture.md",
+        "reviewType": "架构结构树 第 {{CURRENT_ROUND_PADDED}} 轮",
+        "status": "pass",
+        "reason": "架构树已确认，{{FILE_LIST_COUNT}} 个文件已创建。"
+      }
+    },
+    {
+      "id": "e03-12",
+      "action": "write_file",
+      "desc": "终端通知（保存码 C{当前常量}-m03）",
+      "input": "runtime/terminals/c/conversations.json",
+      "append_array": true,
+      "condition": "{{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout'",
+      "content": {
+        "round": "C{{CURRENT_ROUND_PADDED}}-m03",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "✅ 架构树已确认并创建。\n\n---"
+      }
+    },
+    {
+      "id": "e03-13",
+      "action": "syslog",
+      "desc": "系统日志",
+      "condition": "{{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout'",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[审查窗] 第 {{CURRENT_ROUND_PADDED}} 轮架构树已创建（{{CONFIRM_RESULT == 'confirmed' ? '用户确认' : '自动超时'}}）{{CHANGED == 'false' ? '（未变化）' : ''}}"
+        }
+      ]
+    },
+    {
+      "id": "e03-14",
+      "action": "broadcast",
+      "desc": "C{轮次}-d03 — D03 architecture 已更新",
+      "condition": "{{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout'",
+      "code": "C{{CURRENT_ROUND_PADDED}}-d03"
+    },
+    {
+      "id": "e03-15",
+      "action": "broadcast",
+      "desc": "C{当前常量} — 通知 201 开始步骤拆解",
+      "condition": "{{CONFIRM_RESULT}} == 'confirmed' || {{CONFIRM_RESULT}} == 'timeout'",
+      "code": "C{{CURRENT_ROUND_PADDED}}"
+    }
+  ],
+  "variables": {
+    "CURRENT_MODEL": "引擎注入",
+    "REQUIREMENTS": "read_file 提取",
+    "REVIEW_RULES": "read_file 提取",
+    "CURRENT_ARCH": "read_file 提取",
+    "CHANGED": "parse 提取",
+    "SIMILARITY": "parse 提取",
+    "PROJECT_TYPE": "parse 提取",
+    "SUMMARY": "parse 提取",
+    "TREE": "parse 提取",
+    "FILE_LIST": "parse 提取",
+    "FILE_LIST_COUNT": "引擎派生",
+    "CONFIRM_RESULT": "user_confirm 写入",
+    "TIMESTAMP": "引擎注入",
+    "NOW": "引擎注入"
+  }
+}

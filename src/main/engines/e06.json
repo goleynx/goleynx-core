@@ -1,0 +1,118 @@
+{
+  "code": "B0001-e06",
+  "sender": "b",
+  "senderName": "中枢窗",
+  "receiver": "b",
+  "receiverName": "中枢窗",
+  "description": "收到 off{轮次} → 201 读蓝图 → LLM生成总结汇报+执行状态 → 追加D05执行状态 → 追加D06总结 → 终端+日志",
+  "trigger": {
+    "pattern": "^off\\d{4}$",
+    "listener": "b"
+  },
+  "round": "0001",
+  "steps": [
+    {
+      "id": "e06-1",
+      "action": "read_file",
+      "desc": "读 D01 goals.md — 知道本轮项目目标",
+      "input": "core/goals.md",
+      "output_key": "GOALS"
+    },
+    {
+      "id": "e06-2",
+      "action": "read_file",
+      "desc": "读 D05 steps.md — 知道本轮做了哪一组文件 + 下一组预告",
+      "input": "core/steps.md",
+      "output_key": "STEPS"
+    },
+    {
+      "id": "e06-3",
+      "action": "read_file",
+      "desc": "读审查记录 — 知道本轮交付物审查情况",
+      "input": "runtime/panels/c/reviews.json",
+      "output_key": "REVIEWS_RAW"
+    },
+    {
+      "id": "e06-4",
+      "action": "read_file",
+      "desc": "读调度指令 — 知道401实际交付了什么文件",
+      "input": "runtime/dispatch/B{{CURRENT_ROUND_PADDED}}-s{{CURRENT_ROUND_PADDED}}-D.json",
+      "output_key": "INSTRUCTION_RAW"
+    },
+    {
+      "id": "e06-5",
+      "action": "read_file",
+      "desc": "读已有 D06 summary.md（core_append 追加用，首次为空）",
+      "input": "core/summary.md",
+      "output_key": "CURRENT_SUMMARY",
+      "fallback": ""
+    },
+    {
+      "id": "e06-6",
+      "action": "llm_call",
+      "desc": "LLM 生成总结汇报 + 执行状态",
+      "sourceName": "中枢窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是 Goleynx 首席技术汇报官（201 中枢窗）。\n\n当前轮次：{{CURRENT_ROUND_PADDED}}\n\n你的职责：本轮已结束，你需要产出两样东西——\n1. 总结汇报（写入 D06 summary.md）\n2. 执行状态（写入 D05 steps.md 末尾）\n\n【总结汇报格式】Markdown，纯事实陈述，不要评价渲染：\n### 📊 第 {{CURRENT_ROUND_PADDED}} 轮总结\n\n**完成步骤**：D05{{CURRENT_ROUND_PADDED}}\n\n**交付文件**：(从 steps.md 当前调度组提取文件清单，bullets)\n\n**关键成果**：(1-2句，本轮实际完成了什么功能/页面/模块)\n\n**下一轮预告**：(从 steps.md 判断是否还有下一组，如有则\"下一轮将完成 D05[编号] xxx\"；如全部完成则\"🧧 项目全部完成！\")\n\n【执行状态格式】一行，格式：\n> ✅ [s{{CURRENT_ROUND_PADDED}}] {组名} — 第 {{CURRENT_ROUND_PADDED}} 轮执行完毕（off{{CURRENT_ROUND_PADDED}}）— 交付 N 个文件\n\n其中 {组名} 从 steps.md 当前调度组标题提取，N 从调度指令提取实际交付文件数。\n\n严格按以下 XML 返回：\n\n<result>\n  <summary>总结汇报完整 Markdown 内容</summary>\n  <execution_status>执行状态一行</execution_status>\n</result>\n\n注意：summary 内不要包裹 ``` 代码块，execution_status 内不要多余空格换行。",
+      "user_prompt_template": "## 当前轮次：{{CURRENT_ROUND_PADDED}}\n\n## 目标对齐（goals.md，只看最后一轮）：\n{{GOALS}}\n\n## 开发步骤（steps.md，定位 [s{{CURRENT_ROUND_PADDED}}] 当前组）：\n{{STEPS}}\n\n## 审查记录（reviews.json，本轮条目）：\n{{REVIEWS_RAW}}\n\n## 调度指令（d05-instruction.json，401接到的工单）：\n{{INSTRUCTION_RAW}}",
+      "output_key": "e06_raw"
+    },
+    {
+      "id": "e06-7",
+      "action": "parse",
+      "desc": "解析 LLM 输出 — 提取 summary 和 execution_status",
+      "input_key": "e06_raw",
+      "rules": {
+        "summary": "match:<summary>([\\s\\S]*?)</summary>",
+        "execution_status": "match:<execution_status>([\\s\\S]*?)</execution_status>"
+      },
+      "output_key": "e06_parsed"
+    },
+    {
+      "id": "e06-9",
+      "action": "write_file",
+      "desc": "追加总结汇报到 D06 summary.md（core_append）",
+      "core_append": true,
+      "input": "core/summary.md",
+      "content_template": "\n## d06 第 {{CURRENT_ROUND_PADDED}} 轮总结汇报\n\n{{SUMMARY}}\n\n---"
+    },
+    {
+      "id": "e06-10",
+      "action": "write_file",
+      "desc": "写 201 终端（保存码 B{轮次}-m01）",
+      "input": "runtime/terminals/b/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "B{{CURRENT_ROUND_PADDED}}-m01",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "[中枢] 第 {{CURRENT_ROUND_PADDED}} 轮结束 — off{{CURRENT_ROUND_PADDED}}\n\n{{EXECUTION_STATUS}}\n\n{{SUMMARY}}"
+      }
+    },
+    {
+      "id": "e06-11",
+      "action": "syslog",
+      "desc": "系统日志",
+      "entries": [
+        {
+          "category": "中枢",
+          "sourceName": "中枢窗",
+          "message": "[中枢窗] 第 {{CURRENT_ROUND_PADDED}} 轮结束 — D05 执行状态 + D06 总结汇报已写入"
+        }
+      ]
+    }
+  ],
+  "variables": {
+    "CURRENT_MODEL": "引擎注入",
+    "CURRENT_ROUND_PADDED": "引擎注入（4位轮次常量）",
+    "GOALS": "read_file 提取 D01",
+    "STEPS": "read_file 提取 D05",
+    "REVIEWS_RAW": "read_file 提取 reviews.json",
+    "INSTRUCTION_RAW": "read_file 提取 d05-instruction.json",
+    "CURRENT_SUMMARY": "read_file 提取 D06（首次为空）",
+    "SUMMARY": "parse 提取 总结汇报 Markdown",
+    "EXECUTION_STATUS": "parse 提取 执行状态一行",
+    "TIMESTAMP": "引擎注入",
+    "NOW": "引擎注入"
+  }
+}

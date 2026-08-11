@@ -1,0 +1,262 @@
+{
+  "code": "C0001-e08",
+  "sender": "c",
+  "senderName": "审查窗",
+  "receiver": "c",
+  "receiverName": "审查窗",
+  "description": "收到 {执行体}{轮次}-v{调度版次}-{送审迭代} → 读蓝图+调度指令 → LLM审查 → 通过发off / 不通过写reject并广播C{轮次}-r{版次}-{迭代}-{执行体} / 架构变化时写arch-regen+广播C{轮次}-00通知E05重生步骤→B{轮次}-00握手后发off(401读到驳回后自动重写→送审迭代+1→循环；第6次迭代由window-agent熔断写melted标记)",
+  "trigger": {
+    "pattern": "^[A-Z]\\d{4}-v\\d{2}-\\d{2}$",
+    "listener": "c",
+    "max_iterations": 6
+  },
+  "round": "0001",
+  "steps": [
+    {
+      "id": "e08-1",
+      "action": "read_file",
+      "desc": "读 D01 目标对齐 — 判断代码是否偏离项目目标",
+      "input": "core/goals.md",
+      "output_key": "GOALS"
+    },
+    {
+      "id": "e08-2",
+      "action": "read_file",
+      "desc": "读 D03 架构结构 — 判断文件位置和依赖关系是否正确",
+      "input": "runtime/arch-files.json",
+      "output_key": "ARCHITECTURE"
+    },
+    {
+      "id": "e08-3",
+      "action": "read_file",
+      "desc": "读 D05 开发步骤 — 定位当前调度组的文件清单和完成效果",
+      "input": "core/steps.md",
+      "output_key": "STEPS"
+    },
+    {
+      "id": "e08-4",
+      "action": "read_file",
+      "desc": "读 D04 审查规则 — 7条规则+量化红线, 判决法典",
+      "input": "core/review-rules.md",
+      "output_key": "REVIEW_RULES"
+    },
+    {
+      "id": "e08-5",
+      "action": "read_file",
+      "desc": "读调度指令 — E10 给执行体下达的硬核技术工单，审查标尺（按提交所属任务槽 REVIEW_SLOT 动态读取，重分配后也能正确定位原工单）",
+      "input": "runtime/dispatch/B{{CURRENT_ROUND_PADDED}}-s{{CURRENT_ROUND_PADDED}}-01-{{REVIEW_SLOT}}.json",
+      "output_key": "INSTRUCTION_RAW"
+    },
+    {
+      "id": "e08-5b",
+      "action": "read_file",
+      "desc": "读并发元数据 — 201 下发了几个执行体，301 就要等几个",
+      "input": "runtime/dispatch/B{{CURRENT_ROUND_PADDED}}-s{{CURRENT_ROUND_PADDED}}-meta.json",
+      "output_key": "META_RAW"
+    },
+    {
+      "id": "e08-5c",
+      "action": "read_file",
+      "desc": "读上次驳回指令 — 若存在则为复审，聚焦核验上次打回点（首次送审 r00 不存在→空）",
+      "input": "runtime/reject/C{{CURRENT_ROUND_PADDED}}-r{{TRIGGER_VERSION}}-{{TRIGGER_PREV_ITERATION}}-{{TRIGGER_EXECUTOR}}.json",
+      "output_key": "PREV_REJECTION"
+    },
+    {
+      "id": "e08-5d",
+      "action": "read_file",
+      "desc": "读历史纠查标记 — 判断本轮是否目标对齐已变化（B 系列 e10 写入），以及历史是否已纠查完",
+      "input": "runtime/reconcile/{{CURRENT_ROUND_PADDED}}.json",
+      "output_key": "RECONCILE_MARK_RAW",
+      "fallback": "{}"
+    },
+    {
+      "id": "e08-5e",
+      "action": "parse",
+      "desc": "解析纠查标记状态 → TARGET_CHANGED / DEV_STEPS_UPDATED / HISTORICAL_DONE",
+      "input_key": "RECONCILE_MARK_RAW",
+      "rules": {
+        "TARGET_CHANGED": "match:\"targetChanged\"\\s*:\\s*(true|false)",
+        "DEV_STEPS_UPDATED": "match:\"devStepsUpdated\"\\s*:\\s*(true|false)",
+        "HISTORICAL_DONE": "match:\"historicalDone\"\\s*:\\s*(true|false)"
+      },
+      "output_key": "RECONCILE_MARK_PARSED"
+    },
+    {
+      "id": "e08-6",
+      "action": "llm_call",
+      "desc": "LLM 五维度交叉审查（指令→规则→架构→目标→步骤）",
+      "sourceName": "审查窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是 Goleynx 首席审查官（301 审查窗）。\n\n只审查不写码。审查 401 执行窗本轮交付的代码。\n\n当前轮次：{{CURRENT_ROUND_PADDED}}（步骤编号 D05{{CURRENT_ROUND_PADDED}}）\n\n审查方法：从「指令-规则-架构-目标-步骤」五维度交叉校验。不逐行读代码，而是校验交付物是否满足所有要求。\n\n审查依据优先级：\n1. 调度指令 — 文件数量/路径/接口契约是否一致（最高优先级）\n2. 审查规则 — 7条规则逐条检查\n3. 架构结构 — 文件位置/依赖关系\n4. 目标对齐 — 是否偏离项目目标\n5. 开发步骤 — 完成效果\n\n审查维度：\n1. 指令完成度：每个文件是否都交付？路径和接口是否一致？\n2. 架构合规性：文件位置正确？无越界引用？\n3. 规则合规：单一职责/UI逻辑分离/魔法字符零容忍/拆解规则/依赖关系/目标偏移\n4. 量化红线：文件≥400行打回/函数≥80行打回/嵌套≥4层警告\n5. 整体结论：通过或打回\n\n复审规则：\n- 若下方「上次驳回意见」为空，按正常 5 维审查处理。\n- 若「上次驳回意见」非空，说明这是该执行体的重送审（复审）：只聚焦核验上次驳回点是否已修复 + 轻量健全性检查（如新引入的明显错误），不要再从零做完整 5 维审查，也不要对未改动部分重复挑刺。\n\n私建分级处理（按 {{TRIGGER_ITERATION}} 判断送审次数，取代一刀切打回）：\n本轮是该执行体第 {{TRIGGER_ITERATION}} 次送审。根据次数采用不同策略：\n\n送审 1-2 次（宽松期）：\n- 同模块扩展：若执行窗在工单涉及的同一父目录下新增了文件（如 s0001 负责 shared/ui/Modal/，新增了 shared/ui/Modal/types.ts），视为合理的模块内扩展，**不要因此打回**。\n- 在 <details> 中记录「E08 已标记 N 个额外文件：路径（留待收敛点兜底合并）」，并设置 passed=true。\n- 跨域越界仍驳回：若新增文件属于完全不同的模块（如 UI 任务下写了 API 文件、数据模型文件），仍按正常规则打回。\n- 路径违规仍驳回：若新增文件的父目录完全不在 D03 架构树已知目录中，仍打回。\n\n送审 3-4 次（收紧期）：\n- 不再接受任何工单外的新增文件。reject_files 应仅包含工单文件 + 送审 1-2 期被标记放行的扩展文件。\n- 若执行窗仍引入额外文件，打回并说明「已超过宽容迭代，禁止新增文件，仅可修改已列出的文件」。\n\n送审 ≥5 次（铁腕期）：\n- 文件路径必须与 reject_files 精确匹配（含路径前缀），多一个文件、少一个文件、路径偏差一级都打回。\n- instructions 中只需列出「必须修改的文件」和「每个文件必须修复的具体问题」，不超过 3 条。\n- 如果在此之前已熔断过（melted 标记存在），不要甩锅给调度(E10)——这是最后机会，直接指明正确路径和修复动作。\n\n契约红线（路径合法性校验）：\n- 调度指令里出现的每个文件路径，其所在目录层必须能在 D03 架构结构树中找到对应层级。\n- 若文件路径的父目录不在架构树已知目录中且在送审 ≥3 次：打回，reject_files 列出违规文件，instructions 指明正确路径。\n\n严格按以下 XML 返回：\n\n<result>\n  <passed>true或false</passed>\n  <summary>一句话结论，如\"第0001轮审查通过\"</summary>\n  <details>逐条分析，格式\"1. 指令完成度：xxx\"</details>\n  <reject_files>不通过时列出需重写文件(workspace/开头,每行一个)，通过则为空</reject_files>\n  <instructions>不通过时给出简明重写指令，通过则为空</instructions>\n</result>",
+      "user_prompt_template": "## 当前轮次：{{CURRENT_ROUND_PADDED}}\n\n## D01 目标对齐：\n{{GOALS}}\n\n## D03 架构结构：\n{{ARCHITECTURE}}\n\n## D05 开发步骤：\n{{STEPS}}\n\n## D04 审查规则：\n{{REVIEW_RULES}}\n\n## 调度指令（401接到的工单）：\n{{INSTRUCTION_RAW}}\n\n## 上次驳回意见（空=首次审查；非空=复审，请聚焦核验这些点是否已修复）：\n{{PREV_REJECTION}}",
+      "output_key": "review_raw"
+    },
+    {
+      "id": "e08-7",
+      "action": "parse",
+      "desc": "解析 LLM 审查结果",
+      "input_key": "review_raw",
+      "rules": {
+        "passed": "match:<passed>(.*?)</passed>",
+        "summary": "match:<summary>(.*?)</summary>",
+        "details": "match:<details>([\\s\\S]*?)</details>",
+        "reject_files": "match:<reject_files>([\\s\\S]*?)</reject_files>",
+        "instructions": "match:<instructions>([\\s\\S]*?)</instructions>"
+      },
+      "output_key": "review_parsed"
+    },
+    {
+      "id": "e08-8",
+      "action": "write_file",
+      "desc": "写审查记录到 301 面板（reviews.json）— 通过/打回都写",
+      "input": "runtime/panels/c/reviews.json",
+      "append_array": true,
+      "content": {
+        "round": "{{CURRENT_ROUND_PADDED}}",
+        "id": "e08-{{NOW}}",
+        "timestamp": "{{TIMESTAMP}}",
+        "fileName": "{{TRIGGER_EXECUTOR}}{{CURRENT_ROUND_PADDED}}-v{{TRIGGER_VERSION}}-{{TRIGGER_ITERATION}}",
+        "executor": "{{TRIGGER_EXECUTOR}}",
+        "reviewType": "第 {{CURRENT_ROUND_PADDED}} 轮 {{TRIGGER_EXECUTOR}} {{TRIGGER_ITERATION == '01' ? '首次审查' : ('复审·第' + TRIGGER_ITERATION + '次送审')}}",
+        "status": "{{PASSED == 'true' ? 'pass' : 'reject'}}",
+        "reason": "{{SUMMARY}}"
+      }
+    },
+    {
+      "id": "e08-8b",
+      "action": "check_convergence",
+      "desc": "收敛检查：统计本轮已通过执行体数，判断是否全部通过"
+    },
+    {
+      "id": "e08-9",
+      "action": "write_file",
+      "desc": "写 301 终端（审查意见，C{轮次}-m01）— 通过/打回都写",
+      "input": "runtime/terminals/c/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "C{{CURRENT_ROUND_PADDED}}-m01",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "[e08 最终审查] 第 {{CURRENT_ROUND_PADDED}} 轮 {{TRIGGER_EXECUTOR}} {{TRIGGER_ITERATION == '01' ? '首次审查' : ('复审·第' + TRIGGER_ITERATION + '次送审')}} {{PASSED == 'true' ? '✅ 通过' : '❌ 打回'}}\n\n{{SUMMARY}}\n\n{{DETAILS}}"
+      }
+    },
+    {
+      "id": "e08-10",
+      "action": "syslog",
+      "desc": "系统日志",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[审查窗] 第 {{CURRENT_ROUND_PADDED}} 轮 {{TRIGGER_EXECUTOR}} V{{TRIGGER_VERSION}}-第{{TRIGGER_ITERATION}}次 e08：{{PASSED == 'true' ? '✅ 通过' : '❌ 打回'}} — {{SUMMARY}}"
+        }
+      ]
+    },
+    {
+      "id": "e08-10c",
+      "action": "syslog",
+      "desc": "❌ 打回 → 系统日志记录驳回指令码（带迭代，递增不覆盖）",
+      "condition": "{{PASSED}} != 'true'",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[审查窗] 第 {{CURRENT_ROUND_PADDED}} 轮 {{TRIGGER_EXECUTOR}} 已打回 → 下发驳回指令 C{{CURRENT_ROUND_PADDED}}-r{{TRIGGER_VERSION}}-{{TRIGGER_ITERATION}}-{{TRIGGER_EXECUTOR}}（第 {{TRIGGER_ITERATION}} 次驳回，已写入 runtime/reject/ 新文件，不覆盖旧驳回）"
+        }
+      ]
+    },
+    {
+      "id": "e08-10b",
+      "action": "syslog",
+      "desc": "✅ 通过但未全收敛 → 等待其余执行体",
+      "condition": "{{PASSED}} == 'true' && {{ALL_PASSED}} == 'false'",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[审查窗] 第 {{CURRENT_ROUND_PADDED}} 轮 {{TRIGGER_EXECUTOR}} 已通过 — {{PASS_COUNT}}/{{EXPECTED_COUNT}} 收敛，等待其余执行体"
+        }
+      ]
+    },
+    {
+      "id": "e08-11",
+      "action": "broadcast",
+      "desc": "✅ 全部通过 → 发 off{轮次}（触发 e06 总结汇报 + round +1）；目标变化且历史未纠查时本条件不成立，改由 e08-16 调起 E09",
+      "condition": "{{PASSED}} == 'true' && {{ALL_PASSED}} == 'true' && {{OFF_ALLOWED}} == 'true' && {{ARCH_MERGED}} != 'true' && ({{TARGET_CHANGED}} != 'true' || {{HISTORICAL_DONE}} == 'true')",
+      "code": "off{{CURRENT_ROUND_PADDED}}"
+    },
+    {
+      "id": "e08-16",
+      "action": "chain_engine",
+      "desc": "目标已变化 + 开发步骤已重抽 + 历史尚未纠查 + 非首轮 → 链式调起 E09 历史纠查（不发 off，由 E09 收尾发 off）",
+      "condition": "{{PASSED}} == 'true' && {{ALL_PASSED}} == 'true' && {{TARGET_CHANGED}} == 'true' && {{DEV_STEPS_UPDATED}} == 'true' && {{HISTORICAL_DONE}} != 'true' && {{IS_FIRST}} != 'true'",
+      "chain_code": "e09"
+    },
+    {
+      "id": "e08-12",
+      "action": "write_file",
+      "desc": "❌ 不通过 → 写驳回指令到 reject/ 目录（信标同名文件，401 executor-driver 读取）",
+      "condition": "{{PASSED}} != 'true'",
+      "input": "runtime/reject/C{{CURRENT_ROUND_PADDED}}-r{{TRIGGER_VERSION}}-{{TRIGGER_ITERATION}}-{{TRIGGER_EXECUTOR}}.json",
+      "content_template": "{\"round\":\"{{CURRENT_ROUND_PADDED}}\",\"status\":\"reject\",\"summary\":\"{{SUMMARY}}\",\"reject_files\":\"{{REJECT_FILES}}\",\"instructions\":\"{{INSTRUCTIONS}}\",\"timestamp\":\"{{TIMESTAMP}}\"}"
+    },
+    {
+      "id": "e08-13",
+      "action": "write_file",
+      "desc": "❌ 不通过 → 写 401 终端（打回通知，401 执行窗可见）",
+      "condition": "{{PASSED}} != 'true'",
+      "input": "runtime/terminals/{{TRIGGER_EXECUTOR_LOWER}}/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "C{{CURRENT_ROUND_PADDED}}-r{{TRIGGER_VERSION}}-{{TRIGGER_ITERATION}}",
+        "timestamp": "{{NOW}}",
+        "role": "system",
+        "content": "[审查打回] 第 {{CURRENT_ROUND_PADDED}} 轮 审查不通过\n\n原因：{{SUMMARY}}\n\n需要重写的文件：\n{{REJECT_FILES}}\n\n重写要求：\n{{INSTRUCTIONS}}\n\n---\n正在根据审查意见重新生成..."
+      }
+    },
+    {
+      "id": "e08-14",
+      "action": "broadcast",
+      "desc": "❌ 不通过 → 发 C{轮次}-r01-01-D 定向驳回 401",
+      "condition": "{{PASSED}} != 'true'",
+      "code": "C{{CURRENT_ROUND_PADDED}}-r{{TRIGGER_VERSION}}-{{TRIGGER_ITERATION}}-{{TRIGGER_EXECUTOR}}"
+    },
+    {
+      "id": "e08-15",
+      "action": "write_file",
+      "desc": "❌ 不通过 → 写 301 终端（打回详情，C{轮次}-m02）",
+      "condition": "{{PASSED}} != 'true'",
+      "input": "runtime/terminals/c/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "C{{CURRENT_ROUND_PADDED}}-m02",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "[e08 打回] 已通知 401 重写以下文件：\n{{REJECT_FILES}}\n\n指令：{{INSTRUCTIONS}}"
+      }
+    }
+  ],
+  "variables": {
+    "CURRENT_MODEL": "引擎注入",
+    "CURRENT_ROUND_PADDED": "引擎注入（4位轮次常量）",
+    "GOALS": "read_file 提取 D01",
+    "ARCHITECTURE": "read_file 提取 D03",
+    "STEPS": "read_file 提取 D05",
+    "REVIEW_RULES": "read_file 提取 D04",
+    "INSTRUCTION_RAW": "read_file 提取 d05-instruction.json",
+    "PASSED": "parse 提取 true/false",
+    "SUMMARY": "parse 提取",
+    "DETAILS": "parse 提取",
+    "REJECT_FILES": "parse 提取 (workspace/路径)",
+    "INSTRUCTIONS": "parse 提取 (给401的重写命令)",
+    "TIMESTAMP": "引擎注入",
+    "NOW": "引擎注入",
+    "TRIGGER_PREV_ITERATION": "引擎注入（上一送审迭代，复审聚焦用）",
+    "PREV_REJECTION": "read_file 提取 上次驳回指令（空=首次审查）",
+    "OFF_ALLOWED": "check_convergence 注入（同轮仅下发一次 OFF）",
+    "TARGET_CHANGED": "parse 提取 纠查标记（目标已变化=true）",
+    "DEV_STEPS_UPDATED": "parse 提取 纠查标记（开发步骤已重抽=true）",
+    "HISTORICAL_DONE": "parse 提取 纠查标记（历史已纠查完=true）",
+    "IS_FIRST": "引擎注入（首轮=true，排除首轮误触发 E09）"
+  }
+}

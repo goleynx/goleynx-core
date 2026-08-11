@@ -1,0 +1,224 @@
+{
+  "code": "C0001-e07",
+  "sender": "c",
+  "senderName": "审查窗",
+  "receiver": "c",
+  "receiverName": "审查窗",
+  "description": "301 收到 B{当前常量} → 跑交叉验证引擎 → 验证 D01 goals.md（不通过则修正）→ 链式调用 e02",
+  "trigger": {
+    "pattern": "^B\\d{4}$",
+    "listener": "c"
+  },
+  "round": "0001",
+  "steps": [
+    {
+      "id": "e07-1",
+      "action": "read_file",
+      "desc": "读取目标对齐文件 (D01)",
+      "input": "core/goals.md",
+      "output_key": "GOALS"
+    },
+    {
+      "id": "e07-2",
+      "action": "read_file",
+      "desc": "读取 101 对话",
+      "input": "runtime/terminals/a/conversations.json",
+      "output_key": "conversations_2000"
+    },
+    {
+      "id": "e07-3",
+      "action": "llm_call",
+      "desc": "301 交叉验证 + 比较已有审查",
+      "sourceName": "审查窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是项目审查专家（301 审查窗）。你需要比对「目标对齐文件」和「101 原始对话」，判断目标对齐是否准确反映用户真实意图。\n\n当前轮次：{{CURRENT_ROUND_PADDED}}\n\n任务：\n1. 阅读 goals.md（包含所有轮次的更新记录）\n2. 找到本轮（第 {{CURRENT_ROUND_PADDED}} 轮）的更新记录\n3. 判断本轮更新内容是否准确反映用户最新意图\n\n输出规则：\n- 如果本轮是第 1 轮（0001）：必写 5 条理由（用户意图核对 / 项目类型核对 / 约束核对 / 项目名核对 / 总体结论）\n- 如果本轮更新是\"目标未发生变化\"：审查结论大概率一致，changed=false，只写\"目标未发生变化，相似度 XX%\"\n- 如果本轮更新是完整新目标：changed=true，写完整 5 条理由\n\n审查维度（changed=true 时逐条分析）：\n1. 用户意图核对 — 目标对齐是否完整概括了用户表达的核心需求？\n2. 项目类型核对 — 判断的项目类型（APP/网页/桌面等）与用户描述是否一致？\n3. 约束核对 — 硬性约束（如离线、语言、平台）是否有遗漏或误判？\n4. 项目名称核对 — 提炼的项目名是否准确（5-8 字）？\n5. 总体结论 — 是否通过\n\n严格按以下 XML 返回：\n\n<result>\n  <consistent>true或false</consistent>\n  <changed>true或false</changed>\n  <similarity>0-100</similarity>\n  <summary>一句话结论（面板显示，含\"第 {{CURRENT_ROUND_PADDED}} 轮\"）</summary>\n  <reason>\n如果 changed=true：5 条理由（每条格式\"1. 用户意图核对：xxx\"）\n如果 changed=false：一句话\"目标未发生变化，相似度 XX%\"\n  </reason>\n</result>",
+      "user_prompt_template": "## 当前轮次：{{CURRENT_ROUND_PADDED}}\n\n## 目标对齐文件（goals.md）：\n{{GOALS}}\n\n## 101 原始对话：\n{{CONVERSATIONS_RAW}}",
+      "output_key": "validation_raw"
+    },
+    {
+      "id": "e07-4",
+      "action": "parse",
+      "desc": "解析交叉验证结果",
+      "input_key": "validation_raw",
+      "rules": {
+        "consistent": "match:<consistent>(.*?)</consistent>",
+        "changed": "match:<changed>(.*?)</changed>",
+        "similarity": "match:<similarity>(.*?)</similarity>",
+        "summary": "match:<summary>(.*?)</summary>",
+        "reason": "match:<reason>([\\s\\S]*?)</reason>"
+      },
+      "output_key": "validation"
+    },
+    {
+      "id": "e07-5",
+      "action": "write_file",
+      "desc": "审查记录 #1：目标交叉验证",
+      "input": "runtime/panels/c/reviews.json",
+      "append_array": true,
+      "condition": "{{CONSISTENT}} == 'true' || {{CONSISTENT}} == 'false'",
+      "content": {
+        "round": "{{CURRENT_ROUND_PADDED}}",
+        "id": "cv-{{NOW}}",
+        "timestamp": "{{TIMESTAMP}}",
+        "fileName": "core/goals.md",
+        "reviewType": "目标交叉验证 第 {{CURRENT_ROUND_PADDED}} 轮",
+        "status": "{{CONSISTENT == 'true' ? 'pass' : 'reject'}}",
+        "reason": "{{SUMMARY}}"
+      }
+    },
+    {
+      "id": "e07-6",
+      "action": "write_file",
+      "desc": "写入 301 终端（保存码 C{当前常量}-m01）",
+      "input": "runtime/terminals/c/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "C{{CURRENT_ROUND_PADDED}}-m01",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "[审查] 第 {{CURRENT_ROUND_PADDED}} 轮 目标交叉验证 {{CONSISTENT == 'true' ? '✅ 通过' : '❌ 打回'}}\n\n{{REASON}}\n\n---"
+      }
+    },
+    {
+      "id": "e07-7",
+      "action": "syslog",
+      "desc": "系统日志",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[审查窗] 第 {{CURRENT_ROUND_PADDED}} 轮目标交叉验证：{{CONSISTENT == 'true' ? '通过' : '打回'}}{{CHANGED == 'false' ? '（未变化）' : ''}}"
+        }
+      ]
+    },
+    {
+      "id": "e07-8",
+      "action": "llm_call",
+      "desc": "强制修正：301 直接修正 D01 goals.md",
+      "condition": "{{CONSISTENT}} == 'false'",
+      "sourceName": "审查窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是项目目标提炼专家。下面有一份被审查为「不一致」的目标对齐文件，请你根据原始对话直接修正它。\n\n要求：\n1. 保持原 goals.md 的格式（Markdown）\n2. 修正所有不一致的地方\n3. 输出完整修正后的内容\n\n格式：\n<result>\n  <fixed_content>完整修正后的 Markdown 内容</fixed_content>\n</result>",
+      "user_prompt_template": "## 当前 goals.md（被审查为不一致）：\n{{GOALS}}\n\n## 101 原始对话：\n{{CONVERSATIONS_RAW}}\n\n## 审查意见：\n{{REASON}}",
+      "output_key": "fix_raw"
+    },
+    {
+      "id": "e07-9",
+      "action": "parse",
+      "desc": "解析修正后的内容",
+      "condition": "{{CONSISTENT}} == 'false'",
+      "input_key": "fix_raw",
+      "rules": {
+        "fixed_content": "match:<fixed_content>([\\s\\S]*?)</fixed_content>"
+      },
+      "output_key": "fix_parsed"
+    },
+    {
+      "id": "e07-10",
+      "action": "write_file",
+      "desc": "覆盖写入修正后的 D01 goals.md",
+      "condition": "{{CONSISTENT}} == 'false'",
+      "input": "core/goals.md",
+      "content_template": "{{FIXED_CONTENT}}"
+    },
+    {
+      "id": "e07-11",
+      "action": "write_file",
+      "desc": "审查记录 #2：强制介入（D01）",
+      "condition": "{{CONSISTENT}} == 'false'",
+      "input": "runtime/panels/c/reviews.json",
+      "append_array": true,
+      "content": {
+        "round": "{{CURRENT_ROUND_PADDED}}",
+        "id": "fix-{{NOW}}",
+        "timestamp": "{{TIMESTAMP}}",
+        "fileName": "core/goals.md",
+        "reviewType": "强制介入 第 {{CURRENT_ROUND_PADDED}} 轮",
+        "status": "pass",
+        "reason": "修改 D01 goals.md — 已完成。原审查意见：{{SUMMARY}}"
+      }
+    },
+    {
+      "id": "e07-12",
+      "action": "write_file",
+      "desc": "写入 301 终端：强制介入记录",
+      "condition": "{{CONSISTENT}} == 'false'",
+      "input": "runtime/terminals/c/conversations.json",
+      "append_array": true,
+      "content": {
+        "round": "C{{CURRENT_ROUND_PADDED}}-m02",
+        "timestamp": "{{NOW}}",
+        "role": "model",
+        "content": "[审查] 第 {{CURRENT_ROUND_PADDED}} 轮 强制介入\n审查打回原因：{{SUMMARY}}\n\n已修正 D01 goals.md。\n\n---"
+      }
+    },
+    {
+      "id": "e07-13",
+      "action": "syslog",
+      "desc": "系统日志：强制介入",
+      "condition": "{{CONSISTENT}} == 'false'",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[审查窗] 第 {{CURRENT_ROUND_PADDED}} 轮强制介入：目标交叉验证不通过，已自动修正 D01"
+        }
+      ]
+    },
+    {
+      "id": "e07-14",
+      "action": "broadcast",
+      "desc": "C{轮次}-d01 — D01 goals 已修正",
+      "condition": "{{CONSISTENT}} == 'false'",
+      "code": "C{{CURRENT_ROUND_PADDED}}-d01"
+    },
+    {
+      "id": "e07-15",
+      "action": "chain_engine",
+      "desc": "目标变化时链式调用 e02（需求清单）",
+      "condition": "{{CHANGED}} == 'true' || {{IS_FIRST}} == 'true'",
+      "chain_code": "e02"
+    },
+    {
+      "id": "e07-16",
+      "action": "broadcast",
+      "desc": "目标未变化 → 发 C{轮次}-s{轮次}-00 → 审查窗结论，直通 E10",
+      "condition": "{{CHANGED}} == 'false' && {{IS_FIRST}} == 'false'",
+      "code": "C{{CURRENT_ROUND_PADDED}}-s{{CURRENT_ROUND_PADDED}}-00"
+    },
+    {
+      "id": "e07-17",
+      "action": "write_file",
+      "desc": "目标已变化（非首轮）→ 落历史纠查双标记：targetChanged + devStepsUpdated（供 e08 收敛闸门触发 E09）",
+      "condition": "{{CHANGED}} == 'true' && {{IS_FIRST}} == 'false'",
+      "input": "runtime/reconcile/{{CURRENT_ROUND_PADDED}}.json",
+      "content_template": "{\"round\":\"{{CURRENT_ROUND_PADDED}}\",\"targetChanged\":true,\"devStepsUpdated\":true,\"historicalDone\":false}"
+    },
+    {
+      "id": "e07-18",
+      "action": "syslog",
+      "desc": "系统日志：目标变化已标记",
+      "condition": "{{CHANGED}} == 'true' && {{IS_FIRST}} == 'false'",
+      "entries": [
+        {
+          "category": "审查",
+          "sourceName": "审查窗",
+          "message": "[审查窗] 第 {{CURRENT_ROUND_PADDED}} 轮 目标对齐已变化 → 标记历史纠查（targetChanged/devStepsUpdated）；本轮链路上游将重抽开发步骤"
+        }
+      ]
+    }
+  ],
+  "variables": {
+    "CURRENT_MODEL": "引擎注入",
+    "GOALS": "read_file 提取",
+    "CONVERSATIONS_RAW": "引擎自动提取",
+    "CONSISTENT": "parse 提取",
+    "CHANGED": "parse 提取",
+    "SIMILARITY": "parse 提取",
+    "SUMMARY": "parse 提取",
+    "REASON": "parse 提取",
+    "FIXED_CONTENT": "parse 提取",
+    "TIMESTAMP": "引擎注入",
+    "NOW": "引擎注入"
+  }
+}

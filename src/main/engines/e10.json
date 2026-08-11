@@ -1,0 +1,208 @@
+{
+  "code": "e10",
+  "sender": "b",
+  "senderName": "中枢窗",
+  "receiver": "b",
+  "receiverName": "中枢窗",
+  "description": "调度引擎 — 读蓝图+提取步骤+拆分文件 → 循环执行体生成工单 → 发调度信标",
+  "trigger": {
+    "pattern": "^[BC]\\d{4}-s\\d{4}-00$",
+    "listener": "b"
+  },
+  "steps": [
+    {
+      "id": "e10-1",
+      "action": "read_file",
+      "desc": "读目标对齐",
+      "input": "core/goals.md",
+      "output_key": "GOALS"
+    },
+    {
+      "id": "e10-2",
+      "action": "read_file",
+      "desc": "读需求清单",
+      "input": "core/requirements.md",
+      "output_key": "REQUIREMENTS"
+    },
+    {
+      "id": "e10-3",
+      "action": "read_file",
+      "desc": "读架构树",
+      "input": "runtime/arch-files.json",
+      "output_key": "ARCHITECTURE"
+    },
+    {
+      "id": "e10-4",
+      "action": "resolve_steps",
+      "desc": "扫描 runtime/steps 取最新 dXXXX 快照，按触发信标 s 段读 s{TRIGGER_STEP}.json（取代读 core/steps.md + 正则抠组）",
+      "round": "{{CURRENT_ROUND_PADDED}}",
+      "output_key": "STEPS"
+    },
+    {
+      "id": "e10-5",
+      "action": "prepare_dispatch",
+      "desc": "提取步骤内容+文件路径+读取已开执行体窗口数",
+      "input_key": "STEPS",
+      "round": "{{CURRENT_ROUND_PADDED}}"
+    },
+    {
+      "id": "e10-5b",
+      "action": "llm_call",
+      "desc": "大模型决策分区：把文件清单分配给若干执行体窗口",
+      "sourceName": "中枢窗",
+      "model": "{{CURRENT_MODEL}}",
+      "system_prompt": "你是 Goleynx 调度总控。任务只有一件：把『待开发文件清单』完整、无重复地分配给若干个『执行体窗口』。\n纪律：\n1. 每个文件必须且只能分配给一个窗口，绝对不能遗漏、不能重复——这是硬性红线。\n2. 窗口从 d 开始顺序命名（d, e, f, g, ...），**必须使用系统在下发指令中指定的窗口数量**，既不能超过也不能少于，禁止空窗口。\n3. 文件是最小分配单元，绝不可把一个文件拆成两半。\n4. 在系统指定的窗口数量内尽量均衡分配文件，但禁止制造空窗口。\n5. 只返回严格 JSON 对象，键为窗口字母（小写），值为该窗口拿到的文件数组（保持原路径字符串原样）。\n示例：{\"d\":[\"workspace/a.ts\"],\"e\":[\"workspace/b.ts\"]}",
+      "user_prompt_template": "## 本轮：{{CURRENT_ROUND_PADDED}} / 步骤 s{{TRIGGER_STEP}}\n## 已开执行体窗口数：{{OPENED_WINDOWS}}\n## **必须使用窗口数（恰好）：{{TARGET_WINDOW_COUNT}}**（系统按「文件量 ÷ 单窗容量」算出，你必须严格使用这个数量，不多不少，只做文件分配，无权增减）\n## 待分配文件清单（共 {{TOTAL_FILES}} 个）：\n{{FILE_PATHS_JOINED}}\n\n请返回恰好 {{TARGET_WINDOW_COUNT}} 个窗口的分区 JSON（不要任何解释文字，只要 JSON）。",
+      "output_key": "PARTITION_RAW"
+    },
+    {
+      "id": "e10-5c",
+      "action": "apply_partition",
+      "desc": "校验+规范化模型分区（窗口从 d 顺序赋值，杜绝缺口/重复），失败回退取模"
+    },
+    {
+      "id": "e10-6",
+      "action": "write_file",
+      "desc": "写 meta.json",
+      "input": "runtime/dispatch/B{{CURRENT_ROUND_PADDED}}-s{{TRIGGER_STEP}}-meta.json",
+      "content_template": "{\"round\":\"{{CURRENT_ROUND_PADDED}}\",\"step\":\"s{{TRIGGER_STEP}}\",\"dispatchCount\":{{DISPATCH_COUNT}},\"executors\":{{EXECUTORS_JSON}},\"totalFiles\":{{TOTAL_FILES}}}"
+    },
+    {
+      "id": "e10-7",
+      "action": "foreach_executor",
+      "desc": "循环执行体生成工单",
+      "steps": [
+        {
+          "id": "e10-7-1",
+          "action": "llm_call",
+          "desc": "调 LLM 生成调度工单",
+          "sourceName": "中枢窗",
+          "model": "{{CURRENT_MODEL}}",
+          "system_prompt": "你是 Goleynx 首席技术总监（中枢窗）。\n\n你的核心职责是将当前轮次的\"业务开发步骤\"降维打击为发给执行窗的\"硬核代码级技术工单\"。\n执行窗已经知晓项目的宏观背景，它现在不需要情绪价值和业务废话，只缺\"技术边界\"和\"代码契约\"。你的任务是框死它的行为，防止 AI 产生代码幻觉、过度发散或引入不必要的依赖。\n\n重要纪律：\n1. 绝对精准：只针对当前调度步骤内容面板所列文件生成指令，其余组绝对不可提及。\n2. 拒绝废话：不要重复\"这能提升用户体验\"、\"这是项目的门面\"等业务描述，直接下达技术标准。\n3. 路径纪律（硬约束）：你列出的每一个文件路径，必须使用完整形式 `workspace/<架构树 D03 规定的根目录>/<相对路径>`（例如架构树规定组件根为 `components/`，则写 `workspace/components/ui/Navbar/index.tsx`）。绝对禁止精简成 `components/...`、`app/...` 这类相对写法——执行窗只认 `workspace/` 开头的完整路径，否则代码无法落盘。**同时绝对禁止私自创建架构树 D03 不存在的目录层（如凭空加 `smart-glasses-store/` 这类层）——路径各层必须能在架构树中找到对应层级，否则会被下发前交叉验证（validate_dispatch）打回并修正。**\n\n你要生成的调度指令必须严格包含以下三个模块：\n\n### 1. ⚠️ 核心纪律 (红线)\n根据当前组的任务性质，明确执行窗绝对不能做的事情。例如：\n- 如果是 UI 阶段：严禁引入状态管理(Zustand/Redux)，严禁发起真实 API 请求。\n- 依赖限制：除框架自带库外，是否允许引入第三方库。\n- 数据隔离：Mock 数据的存放位置限制。\n\n### 2. 📁 开发任务与接口契约\n针对当前组的每一个文件，必须提供具体的代码级指导：\n- 组件/文件的技术职责（精简说明）。\n- 布局范式约束（如：强制 CSS Grid、Flex、指定 Tailwind 核心类名）。\n- 必须定义的 TypeScript Interface（强行规定 Props 或核心数据模型的结构，提供示例字段）。\n- Mock 数据策略或状态初始化要求。\n\n### 3. 🚀 交付标准\n一句话明确该轮次代码生成完毕后，必须达到的可运行状态。\n\n严格按以下 XML 返回（<instruction> 内必须使用 Markdown 排版，纯中文）：\n\n<result>\n  <instruction>你的硬核技术工单内容...</instruction>\n</result>",
+          "user_prompt_template": "## 当前轮次：{{CURRENT_ROUND_PADDED}}\n## 当前调度编号：s{{TRIGGER_STEP}}-{{CURRENT_DISPATCH_COUNT}}\n\n## 目标对齐（goals.md）：\n{{GOALS}}\n\n## 需求清单（requirements.md）：\n{{REQUIREMENTS}}\n\n## 架构树（architecture.md）：\n{{ARCHITECTURE}}\n\n## 当前调度步骤内容（本轮调度的核心任务组）：\n{{CURRENT_STEP_CONTENT}}",
+          "output_key": "llm_reply"
+        },
+        {
+          "id": "e10-7-2",
+          "action": "parse",
+          "desc": "解析指令",
+          "input_key": "llm_reply",
+          "fallback_raw": true,
+          "rules": {
+            "instruction": "match:<instruction>([\\s\\S]*?)</instruction>"
+          }
+        },
+        {
+          "id": "e10-7-3",
+          "action": "write_file",
+          "desc": "写调度工单",
+          "input": "runtime/dispatch/B{{CURRENT_ROUND_PADDED}}-s{{TRIGGER_STEP}}-01-{{CURRENT_EXECUTOR}}.json",
+          "content": {
+            "round": "{{CURRENT_ROUND_PADDED}}",
+            "stepCode": "s{{TRIGGER_STEP}}",
+            "dispatchCount": "{{CURRENT_DISPATCH_COUNT}}",
+            "executor": "{{CURRENT_EXECUTOR_LOWER}}",
+            "fileCount": "{{CURRENT_FILE_COUNT}}",
+            "instruction": "{{INSTRUCTION}}",
+            "timestamp": "{{NOW}}"
+          }
+        },
+        {
+          "id": "e10-7-4",
+          "action": "write_file",
+          "desc": "写执行体终端",
+          "input": "runtime/terminals/{{CURRENT_EXECUTOR_LOWER}}/conversations.json",
+          "append_array": true,
+          "content": {
+            "round": "B{{CURRENT_ROUND_PADDED}}-s{{TRIGGER_STEP}}-{{CURRENT_DISPATCH_COUNT}}",
+            "timestamp": "{{NOW}}",
+            "role": "system",
+            "content": "[调度指令] {{CURRENT_EXECUTOR}}\n\n{{INSTRUCTION}}\n\n---"
+          }
+        },
+        {
+          "id": "e10-7-5",
+          "action": "write_file",
+          "desc": "写 201 终端",
+          "input": "runtime/terminals/b/conversations.json",
+          "append_array": true,
+          "content": {
+            "round": "B{{CURRENT_ROUND_PADDED}}-m02",
+            "timestamp": "{{NOW}}",
+            "role": "model",
+            "content": "[调度] {{CURRENT_EXECUTOR}} s{{TRIGGER_STEP}}-{{CURRENT_DISPATCH_COUNT}}（{{CURRENT_FILE_COUNT}} 文件）\n\n{{INSTRUCTION}}\n\n---"
+          }
+        },
+        {
+          "id": "e10-7-6",
+          "action": "write_file",
+          "desc": "写 201 面板 — 调度已下发",
+          "input": "runtime/panels/b/statuses.json",
+          "append_array": true,
+          "content": {
+            "round": "{{CURRENT_ROUND_PADDED}}",
+            "id": "dispatch-{{NOW}}",
+            "timestamp": "{{TIMESTAMP}}",
+            "type": "调度指令",
+            "message": "📡 s{{TRIGGER_STEP}}-{{CURRENT_DISPATCH_COUNT}}-{{CURRENT_EXECUTOR}} 调度\n\n\n已下发",
+            "stepCode": "s{{TRIGGER_STEP}}",
+            "executor": "{{CURRENT_EXECUTOR_LOWER}}",
+            "dispatchCount": "{{CURRENT_DISPATCH_COUNT}}",
+            "fileCount": "{{CURRENT_FILE_COUNT}}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "e10-7a",
+      "action": "validate_dispatch",
+      "desc": "下发前交叉验证：以架构树 D03 为标尺，修正工单私建/违规目录层路径（发信标前的最后判断）"
+    },
+    {
+      "id": "e10-7b",
+      "action": "broadcast_all",
+      "desc": "一次性广播全部调度信标（真并发唤醒各执行体窗口）"
+    },
+    {
+      "id": "e10-7c",
+      "action": "syslog",
+      "desc": "调度完成日志",
+      "entries": [
+        {
+          "category": "中枢",
+          "sourceName": "中枢窗",
+          "message": "本轮次（轮 {{CURRENT_ROUND_PADDED}}）调度 s{{TRIGGER_STEP}} 任务：共拆分 {{DISPATCH_COUNT}} 个执行体窗口，已全部下发 {{DISPATCH_COUNT}} 个调度信标（覆盖 {{TOTAL_FILES}} 个文件，零重复）。"
+        }
+      ]
+    },
+    {
+      "id": "e10-8",
+      "action": "write_file",
+      "desc": "追加本次调度记录到 steps.md（追加制：对齐状态 + 抄写本轮 S 组 + 分隔线）",
+      "core_append": true,
+      "input": "core/steps.md",
+      "content_template": "\n\n## 调度下发记录 · 第 {{CURRENT_ROUND_PADDED}} 轮 · 步骤 s{{TRIGGER_STEP}} · {{ALIGNMENT_NOTE}}\n\n{{STEP_CONTENT}}\n\n---\n"
+    }
+  ],
+  "variables": {
+    "CURRENT_MODEL": "引擎注入",
+    "GOALS": "read_file",
+    "REQUIREMENTS": "read_file",
+    "ARCHITECTURE": "read_file",
+    "STEPS": "resolve_steps",
+    "STEP_CONTENT": "prepare_dispatch",
+    "STEP_GROUP": "resolve_steps",
+    "STEP_ROUND": "resolve_steps",
+    "STEP_CODE": "prepare_dispatch",
+    "EXECUTORS": "apply_partition",
+    "FILE_SPLITS": "apply_partition",
+    "DISPATCH_COUNT": "apply_partition",
+    "TOTAL_FILES": "prepare_dispatch",
+    "PARTITION_RAW": "llm_call",
+    "OPENED_WINDOWS": "prepare_dispatch",
+    "FILE_PATHS_JOINED": "prepare_dispatch",
+    "CURRENT_EXECUTOR": "foreach_executor",
+    "CURRENT_STEP_CONTENT": "foreach_executor",
+    "INSTRUCTION": "parse"
+  }
+}
